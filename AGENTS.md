@@ -1,85 +1,94 @@
 # AGENTS.md
 
-This file documents conventions and operational context for working in this repository. Both humans and agentic coding tools should read it before non-trivial changes.
+This file documents conventions and operational context for working in this repository. Both humans and agentic coding tools should read it before any non-trivial change. Keep it current as conventions evolve.
 
-## Project context
+`GEMINI.md` is a stub that points back here so the two tools see the same content.
 
-Lightweight in-cluster observability spike: a Kubernetes DaemonSet agent that gathers signals (network bytes from `/proc/net/dev`, plus TCP/HTTP counts via eBPF) and exposes Prometheus `/metrics`, alongside an OpenTelemetry-based pipeline (node sink + central query server) that also serves as a `custom.metrics.k8s.io` API for HPA. The goal is "enough signal for autoscaling/traffic management" with minimum overhead — prefer the standard library and a small dependency set.
+## Current state
 
-> **Note:** all code currently in the repo is throwaway POC. See `docs/requirements.md` and `docs/rough_design.md` for the actual target. The architectural summaries below describe the *current* code so you can navigate it, not the system we're building.
+This repo is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) was removed on the `rewrite` branch in commit `e5235a9`. POC code is preserved on `main` and reachable via `git log main -- <path>`.
+
+All new code lands under a forthcoming AP root at `core/`. As of this writing nothing has been built yet — see issue #64 (v0.1 Foundation) for the bootstrap.
+
+What's in the repo right now:
+
+- `docs/` — design (`docs/design/`), agreed requirements (`docs/requirements.md`), early rough sketch (`docs/rough_design.md`)
+- `AGENTS.md` — this file
+- `GEMINI.md` — stub pointing here
+- `dev/ci/presubmits/` — CI wrappers (stale until `core/` lands)
+- `.github/workflows/` — CI YAML
+- `LICENSE`, `README.md`, `.gitignore`
+
+## Where to read what
+
+| Topic | Doc |
+|---|---|
+| What we're building (agreed) | [`docs/requirements.md`](docs/requirements.md) |
+| How we're building it | [`docs/design/architecture.md`](docs/design/architecture.md) (entry point) |
+| Recorded design decisions | [`docs/design/decisions.md`](docs/design/decisions.md) |
+| Per-subsystem design | other files in [`docs/design/`](docs/design/) |
+| Roadmap (deferred items) | [`docs/design/roadmap.md`](docs/design/roadmap.md) |
+| Issues + milestones | upstream `gke-labs/in-cluster-observability` (see Issue/PR tracking below) |
 
 ## Issue and PR tracking
 
-This clone is a fork. `origin` is `mastersingh24/in-cluster-observability`; `upstream` is `gke-labs/in-cluster-observability`. **Issues and milestones are tracked in `upstream`, not the fork** — `gh repo set-default` is configured accordingly, so `gh issue list`, `gh issue create`, `gh milestone …` operate against `gke-labs/in-cluster-observability` by default. PRs are the standard fork → upstream flow.
+This clone is a fork of `gke-labs/in-cluster-observability`. **All issues and milestones live in upstream**, not the fork. `gh repo set-default` is configured accordingly — `gh issue list`, `gh issue create`, `gh milestone …` target upstream by default. Always link to upstream issue numbers.
 
-When opening or referencing issues, always link to the upstream issue number. Do not open or comment on issues in the fork's tracker.
+PR flow during the rewrite:
 
-## Repository layout — three AP roots, three Go modules
+- **`rewrite`** is the integration branch. Direct pushes are allowed; no per-feature sub-branches.
+- **Commit fine-grained.** One logically separable unit per commit. No WIP megacommits.
+- **At each milestone boundary**, open a PR `rewrite` → `main`. One PR per milestone (v0.1, v0.2, …, v1.0). This is the review gate.
+- **Never commit directly to `main`.** Main accumulates via milestone PRs.
 
-This repo uses [`ap`](https://github.com/gke-labs/gke-labs-infra/tree/main/ap) (autoproject) with **multiple AP roots**. An AP root is any directory containing a `.ap/` directory:
+## Build, test, lint (once `core/` exists)
 
-- **`/` (root)** — module `github.com/gke-labs/in-cluster-observability`. The original Prometheus + eBPF DaemonSet agent (`main.go`, `bpf/metrics.bpf.c`, generated `metrics_bpf{el,eb}.{go,o}`). Deployed via `k8s/manifests.yaml` → image `in-cluster-observability-agent`.
-- **`opentelemetry/`** — module `.../opentelemetry`. The OTLP pipeline (see below). Has its own `k8s/manifest.yaml` deployed to namespace `observability-system`.
-- **`obs/`** — module `.../obs`. A small library wrapping `logr` + OpenTelemetry so spans act as logging contexts and attributes flow to both the span and the logger. See `obs/llms.txt` for the API shape.
-
-Each AP root has its own `images/<name>/Dockerfile`; the build context for an image is **its AP root**, not the repo root. Image names map to directory names — `ap` handles registry prefixing.
-
-## Building, testing, linting
-
-Always invoke `ap` via `go run`, never assume it's installed globally:
+The project uses [`ap`](https://github.com/gke-labs/gke-labs-infra/tree/main/ap) (autoproject). Always invoke via `go run`:
 
 ```
 go run github.com/gke-labs/gke-labs-infra/ap@latest <command>
 ```
 
-| Task                | Command                                            |
-|---------------------|----------------------------------------------------|
-| Generate files      | `ap generate //...`                                |
-| Lint                | `ap lint //...`                                    |
-| Unit tests          | `ap test //...`                                    |
-| Build images        | `ap build //...`                                   |
-| E2E (root agent)    | `ap e2e .`                                         |
-| E2E (otel pipeline) | `ap e2e opentelemetry`                             |
-| Deploy              | `ap deploy` (from an AP root)                      |
+| Task | Command |
+|---|---|
+| Generate files | `ap generate //...` |
+| Lint | `ap lint //...` |
+| Unit + contract tests | `ap test //...` |
+| Build images | `ap build //...` |
+| E2E (Kind required) | `ap e2e core` |
+| Benchmark smoke | `dev/ci/presubmits/ap-bench-smoke` |
 
-CI runs these via thin wrappers in `dev/ci/presubmits/` (`ap-build`, `ap-lint`, `ap-test`, `ap-e2e`, `ap-e2e-opentelemetry`, `ap-verify-generate`). If `ap build` fails in CI, **run it locally before claiming it passes** — GEMINI.md is explicit about this.
+CI runs these via wrappers in `dev/ci/presubmits/`. If `ap build` fails in CI, **run it locally before claiming it passes**.
 
-`ap-verify-generate` will fail if `ap generate //...` produces a diff; the hint there is the fix.
+`ap-verify-generate` fails if `ap generate //...` produces a diff — the hint is the fix.
 
-Standard `go test ./...` works inside any module for quick iteration, but `ap test` is the source of truth (it knows about all three modules). E2E tests are gated by `RUN_E2E` env var and require a Kind cluster — see `tests/e2e/harness.go` and `opentelemetry/tests/e2e/harness.go`.
-
-Run a single Go test the usual way, e.g. `cd opentelemetry && go test ./cmd/opentelemetry-sink -run TestWriter`.
+Until `core/` is bootstrapped (#64), all `ap` commands either no-op or fail with no projects found — expected on `rewrite`.
 
 ## Kubernetes manifest conventions (enforced by `ap`)
 
 - Manifests live in a `k8s/` directory inside the AP root.
 - **Do not set `imagePullPolicy`** unless there's a specific reason — `ap deploy` manages it.
-- Image references should be the bare image name (e.g. `opentelemetry-node-agent`); `ap` adds the registry prefix at deploy time.
+- Image references should be the bare image name (e.g. `ollie`); `ap` adds the registry prefix at deploy.
 
-## OpenTelemetry pipeline architecture (`opentelemetry/`)
+## Apache 2.0 license headers
 
-The flow is **node-local OTLP sinks → central query server → consumers (HPA / `otelctl`)**:
+Every code/config artifact (Go, YAML, Dockerfile, proto, shell) carries the full Apache 2.0 license header with `Copyright 2026 Google LLC` at the top of the file. Auto-injected for Go and shell by `core/.ap/headers.yaml` once present; YAML, Dockerfile, and proto are added by hand. Markdown is unannotated by repo precedent.
 
-1. **`opentelemetry-node-agent`** (DaemonSet, `cmd/opentelemetry-sink/`) — receives OTLP on `:4317` (gRPC) and `:4318` (HTTP). Writes all traces/metrics/logs to a node-local binary file in a **kOps-compatible format**: a 16-byte header (length, CRC32, flags, TypeCode) followed by the marshaled proto. `TypeCode 1` is an `ObjectType` message that maps subsequent codes to proto type names. See `cmd/opentelemetry-sink/README.md` and `AGENTS.md` for design rationale (local storage chosen to avoid memory overhead).
-2. **Registration**: each sink streams a `Register` RPC to the query server (default `queryserver.observability-system:9443`) advertising its own `POD_IP:4317`, heartbeating every 5s. The query server maintains a `Registry` of live sinks.
-3. **`opentelemetry-query-server`** (Deployment, `cmd/opentelemetry-query-server/`) — fans out queries to all registered sinks in parallel, aggregates results. Exposes:
-   - `/query` HTTP — generic query (filter string).
-   - `/apis/custom.metrics.k8s.io/v1beta1/...` — implements the Kubernetes custom metrics API so HPAs can scrape pod metrics. Registered cluster-wide via an `APIService` object (TLS via cert-manager).
-   - gRPC `FrontendQueryService` — used by `otelctl`; takes CEL expressions as filters, compiles them against OTLP proto types, evaluates per-record.
-4. **`otelctl`** (`cmd/otelctl/`) — CLI that port-forwards to the query server pod and runs `logs|traces|metrics [cel-filter...]` queries.
-5. **`test-app` / `test-client`** — load generator pair used by e2e tests (`test-app` emits a `qps` OTel gauge; `test-client` drives traffic at a target QPS).
-
-Protos live in `opentelemetry/proto/` and are generated into `opentelemetry/pkg/pb/` (regenerate via `ap generate`).
-
-## Root agent specifics (`main.go` + `bpf/`)
-
-- eBPF source in `bpf/metrics.bpf.c`; the `go:generate` directive in `main.go` uses `cilium/ebpf`'s `bpf2go` to produce `metrics_bpf{el,eb}.{go,o}`. These generated files **are checked in** and verified by `ap-verify-generate`.
-- Probes attached at startup: kprobes on `tcp_v4_connect` / `inet_csk_accept`, tracepoint on `sys_enter_write` (rough HTTP GET detection by sniffing the buffer). Counters live in BPF hash maps polled every 5s and copied into Prometheus counters.
-- Requires Linux + privileged container (mounts host `/proc` and `/sys`); the local `go run main.go` path will only work on Linux.
+The canonical header text is the one already in use by the repo; see `core/.ap/headers.yaml` (once it lands) for the file used by `ap generate`.
 
 ## Coding conventions
 
-- Standard Go idioms; minimize dependencies (prefer stdlib or established lightweight packages).
-- Apache 2.0 copyright header on every Go and shell file (`copyrightHolder: Google LLC`, see `.ap/headers.yaml`). YAML files are skipped.
-- Add Prometheus or OTel metrics for new functionality where applicable.
-- For Go logging/tracing inside `opentelemetry/`, prefer the `obs` package idiom (`ctx, span := obs.Start(ctx, "name", obs.String(...))`) — see `obs/llms.txt`.
+- Standard Go; minimize dependencies (prefer stdlib or established lightweight packages).
+- Self-observability metric names are prefixed `ollie_<component>_*` — see [`docs/design/operations.md`](docs/design/operations.md) §5.
+- Public Go API surface lives under `core/pkg/*` with explicit stability tags (`// Stability: Stable | Experimental | Internal`) — see [`docs/design/public-api.md`](docs/design/public-api.md) §3.
+- Internal-only code lives under `core/internal/*` (Go's `internal/` convention enforces this).
+- gRPC services proto-defined under `core/proto/<service>/v<N>/`; generated stubs under `core/pkg/.../pb/` via `ap generate`.
+- eBPF (rare; OBI ships its own): `.bpf.c` files under `core/internal/bpf/`, bindings via `bpf2go`. Generated files are checked in.
+
+## OBI integration boundary
+
+The only file in the repo that may import `go.opentelemetry.io/obi/*` is the adapter in `core/pkg/capture`. Everything else depends on our `capture.Manager` interface. OBI is pinned to one minor at a time; bumps live in their own PR with the contract-test suite green. See [`docs/design/obi-integration.md`](docs/design/obi-integration.md) and [ADR-0010](docs/design/decisions.md#adr-0010-obi-version-pinning-and-adapter).
+
+## Keeping this file current
+
+This document is expected to drift if not actively maintained. **Edit it in the same PR as any change that affects conventions** — when `core/` lands, when new build commands appear, when the install namespace changes, when a milestone PR merges. Agentic coding tools have standing authorization to refresh it when they notice it's out of date.
