@@ -6,7 +6,7 @@ This file documents conventions and operational context for working in this repo
 
 ## Current state
 
-This repo is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) was removed on the `rewrite` branch in commit `e5235a9`. POC code is preserved on `main` and reachable via `git log main -- <path>`.
+This repo is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) was removed early in the rewrite. POC code is preserved on `main` and reachable via `git log main -- <path>`.
 
 All code lives at the **repo root** as a single AP root and single Go module `github.com/gke-labs/in-cluster-observability` (per [ADR-0015](docs/design/decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). The **v0.1 Foundation** milestone ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) has landed: the AP root is bootstrapped, the public package skeletons exist with no-op implementations, the OBI adapter shell is in place, and the container image + DaemonSet manifest deploy as a no-op pod. v0.2 (Capture MVP) wires actual eBPF and the first real protocol modules.
 
@@ -41,12 +41,22 @@ What's in the repo:
 
 This clone is a fork of `gke-labs/in-cluster-observability`. **All issues and milestones live in upstream**, not the fork. `gh repo set-default` is configured accordingly — `gh issue list`, `gh issue create`, `gh milestone …` target upstream by default. Always link to upstream issue numbers.
 
-PR flow during the rewrite:
+### Branch and PR workflow
 
-- **`rewrite`** is the integration branch. Direct pushes are allowed; no per-feature sub-branches.
-- **Commit fine-grained.** One logically separable unit per commit. No WIP megacommits.
-- **At each milestone boundary**, open a PR `rewrite` → `main`. One PR per milestone (v0.1, v0.2, …, v1.0). This is the review gate.
-- **Never commit directly to `main`.** Main accumulates via milestone PRs.
+**One integration branch per milestone**, named after the milestone: `v0.1`, `v0.2`, …, `v1.0`. PRs **stack**: each milestone branch PRs to the previous (`v0.2` → `v0.1`, `v0.3` → `v0.2`, …), with `v0.1` → `main` at the bottom of the stack. When a milestone PR merges to `main`, GitHub auto-updates the next PR's base — the stack collapses one PR at a time.
+
+```
+main ◄── PR ── v0.1 ◄── PR ── v0.2 ◄── PR ── v0.3 ── …
+        (#125)         (next)         (next)
+```
+
+Rules:
+
+- **Commit fine-grained on the active milestone branch.** One logically separable unit per commit. No WIP megacommits. Per-issue feature branches are allowed for large or risky work but not required by default.
+- **Each milestone PR is the review gate** for that milestone's work.
+- **Never commit directly to `main`.** Main only advances by merging the bottom of the stack.
+- **Starting milestone vN.M:** `git checkout -b vN.M v<prev>` off the previous milestone branch's tip, `git push -u upstream vN.M`, then `gh pr create --base v<prev> --head vN.M`.
+- **Hygiene fixups** for an in-flight milestone go on that milestone's branch (small commits extending its PR) — not on `main`, not on a later milestone branch.
 
 ## Build, test, lint
 
