@@ -1,0 +1,223 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package capture is the only package in the project that may import
+// OpenTelemetry eBPF Instrumentation (OBI,
+// go.opentelemetry.io/obi/...). Every other package consumes capture
+// via the Manager interface defined here. Per ADR-0010, this isolates
+// OBI's v0 churn to one file.
+//
+// v0.1 ships the interface surface and a no-op Manager only — the
+// real OBI integration lands in v0.2 (issues #70 / #71 / #72 / #73).
+// Until then New(Config) returns a Manager whose Events() channel is
+// already closed and whose lifecycle methods are no-ops.
+//
+// Stability: Experimental — every export in this package may break
+// across MINOR versions until OBI hits 1.0.
+package capture
+
+import (
+	"context"
+	"time"
+)
+
+// Manager is the agent's handle on the eBPF capture pipeline. One
+// per agent process. Method semantics:
+//   - Start: load eBPF programs, attach probes, begin reading events.
+//   - Stop: detach, close the Events() channel, release resources.
+//   - AllowPID/BlockPID: idempotent per-PID enable/disable.
+//   - EnableModule/DisableModule: idempotent per-protocol enable.
+//   - Events: a buffered channel of translated capture events. Closed
+//     on Stop. Readers must drain.
+//   - AddEnricher: registers a hook that mutates events on the hot
+//     path; called synchronously per event in registration order.
+//   - Metrics: handle to the self-observability counters.
+//
+// Stability: Experimental
+type Manager interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+
+	AllowPID(pid uint32, spec PIDSpec) error
+	BlockPID(pid uint32) error
+
+	EnableModule(m Module, cfg ModuleConfig) error
+	DisableModule(m Module) error
+	EnabledModules() []Module
+
+	Events() <-chan Event
+
+	AddEnricher(Enricher)
+
+	Metrics() Metrics
+}
+
+// Config governs construction. Fields are additive; embedders rely
+// on zero-value defaults wherever sensible.
+//
+// Stability: Experimental
+type Config struct {
+	// KubeletAddr is the URL the agent uses to query the node-local
+	// Kubelet for the PID-to-Pod cache bootstrap. Defaults to
+	// "https://127.0.0.1:10250" when empty.
+	KubeletAddr string
+	// ProcPath is the mount point of host /proc inside the agent
+	// container. Defaults to "/proc" when empty.
+	ProcPath string
+	// BpfFSPath is the bpffs mount point used for map pinning.
+	// Defaults to "/sys/fs/bpf" when empty.
+	BpfFSPath string
+	// EventBuffer sizes the Events() channel. Defaults to 4096 when
+	// zero or negative.
+	EventBuffer int
+}
+
+// PIDSpec is what the controller's MonitoringSpec resolves to on a
+// per-PID basis. Passed to AllowPID.
+//
+// Stability: Experimental
+type PIDSpec struct {
+	// Protocols is the set of capture modules to enable for this PID.
+	Protocols []Module
+	// Sampling is an optional per-PID sampling override; zero value
+	// keeps the module-level default.
+	Sampling Sampling
+	// Labels are additional attributes the enricher attaches to events
+	// produced for this PID.
+	Labels map[string]string
+}
+
+// Sampling expresses head-based sampling rates. v0.1 is a struct stub;
+// fields fill in alongside the sampling implementation (issue #109).
+//
+// Stability: Experimental
+type Sampling struct {
+	HeadRate float64 // 0..1; 0 means "use module default"
+}
+
+// Module enumerates the OBI tracer modules this project exposes. The
+// numeric values are not part of the wire protocol; they are stable
+// across minor versions but new modules may be added at the end.
+//
+// Stability: Experimental
+type Module uint16
+
+const (
+	// ModuleL4TCP captures TCP-level counts and timings.
+	ModuleL4TCP Module = iota + 1
+	// ModuleHTTP1 captures plaintext HTTP/1.1.
+	ModuleHTTP1
+	// ModuleHTTP2 captures plaintext HTTP/2.
+	ModuleHTTP2
+	// ModuleGRPC captures gRPC on top of HTTP/2.
+	ModuleGRPC
+	// ModuleTLSGoCryptoTLS decrypts L7 over TLS for Go's crypto/tls.
+	ModuleTLSGoCryptoTLS
+	// ModuleTLSOpenSSL decrypts L7 over TLS for OpenSSL-using binaries.
+	ModuleTLSOpenSSL
+	// ModuleGenAI captures OpenAI / Anthropic / Gemini SDK calls.
+	ModuleGenAI
+)
+
+// String returns a stable lowercase name for the Module.
+//
+// Stability: Experimental
+func (m Module) String() string {
+	switch m {
+	case ModuleL4TCP:
+		return "l4_tcp"
+	case ModuleHTTP1:
+		return "http1"
+	case ModuleHTTP2:
+		return "http2"
+	case ModuleGRPC:
+		return "grpc"
+	case ModuleTLSGoCryptoTLS:
+		return "tls_go_crypto_tls"
+	case ModuleTLSOpenSSL:
+		return "tls_openssl"
+	case ModuleGenAI:
+		return "genai"
+	default:
+		return "unknown"
+	}
+}
+
+// ModuleConfig is the per-module tunable bag. v0.1 is empty; module
+// implementations grow their own fields as they land.
+//
+// Stability: Experimental
+type ModuleConfig struct{}
+
+// EventKind discriminates the Event union.
+//
+// Stability: Experimental
+type EventKind uint8
+
+const (
+	EventUnknown EventKind = iota
+	EventMetric
+	EventSpan
+	EventEdge
+	// EventModuleDegraded is emitted when a Module is forced into the
+	// degraded state by panic recovery or kernel-verifier denial.
+	EventModuleDegraded
+)
+
+// Event is the project-owned shape of a single record translated from
+// OBI's internal types by the adapter. Exactly one of Metric, Span, or
+// Edge is set per Event (matching Kind); for EventModuleDegraded all
+// three are nil and Module names the affected module.
+//
+// Stability: Experimental
+type Event struct {
+	Kind      EventKind
+	Timestamp time.Time
+	PID       uint32
+	Module    Module
+
+	Metric *MetricEvent
+	Span   *SpanEvent
+	Edge   *EdgeEvent
+}
+
+// MetricEvent carries a single tsdb-bound sample. Field set lands with
+// the metric write path in v0.3.
+//
+// Stability: Experimental
+type MetricEvent struct{}
+
+// SpanEvent carries a single OTel-shaped span. Field set lands with
+// the HTTP/gRPC tracers in v0.2.
+//
+// Stability: Experimental
+type SpanEvent struct{}
+
+// EdgeEvent carries a single topology edge record. Field set lands
+// with the topology subsystem in v0.5.
+//
+// Stability: Experimental
+type EdgeEvent struct{}
+
+// Enricher is the hook signature; called synchronously per event in
+// registration order before the writer dispatches.
+//
+// Stability: Experimental
+type Enricher func(ctx context.Context, ev *Event)
+
+// Metrics is the self-observability handle exposed by Manager. Concrete
+// counter types fill in alongside the metric impl in v0.2 (#76).
+//
+// Stability: Experimental
+type Metrics interface{}
