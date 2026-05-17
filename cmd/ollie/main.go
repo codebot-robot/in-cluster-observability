@@ -22,6 +22,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -29,6 +31,7 @@ var version = "v0.1.0-dev"
 
 func main() {
 	versionOnly := flag.Bool("version", false, "print version and exit")
+	stayAlive := flag.Bool("stay-alive", false, "block on SIGINT/SIGTERM after printing version (for DaemonSet deployments)")
 	flag.Parse()
 
 	if *versionOnly {
@@ -39,4 +42,13 @@ func main() {
 	fmt.Fprintf(os.Stderr, "ollie %s\n", version)
 	fmt.Fprintln(os.Stderr, "v0.1 Foundation: stub binary, no functionality wired yet.")
 	fmt.Fprintln(os.Stderr, "Pass --version to print only the version string.")
+
+	if !*stayAlive {
+		return
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	fmt.Fprintln(os.Stderr, "blocking on SIGINT/SIGTERM (--stay-alive)")
+	sig := <-ch
+	fmt.Fprintf(os.Stderr, "received %s; exiting\n", sig)
 }
