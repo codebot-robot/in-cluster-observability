@@ -100,6 +100,25 @@ func TestWriter_ShortCircuitsUnchanged(t *testing.T) {
 	}
 }
 
+func TestWriter_FileIsWorldReadable(t *testing.T) {
+	// The OBI sibling container reads this file as a different uid
+	// than the agent container; world-readable (0644) avoids the
+	// permission-denied class of error in mixed-uid pods.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, _ := obiconfig.NewWriter(path)
+	if _, err := w.Write(obiconfig.DefaultFile("127.0.0.1:4317")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o644 {
+		t.Errorf("file mode = %#o; want 0644 (world-readable)", mode)
+	}
+}
+
 func TestWriter_NoTempArtifactsOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "obi.yaml")

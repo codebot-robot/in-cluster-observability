@@ -98,9 +98,12 @@ type Config struct {
 	// OTLPHTTPAddr is the loopback bind address for the OTLP HTTP
 	// receiver. Empty disables the HTTP receiver. Must be loopback.
 	OTLPHTTPAddr string
-	// OBIEndpoint is the address the agent tells OBI to push OTLP to
-	// (written into ObiConfigPath). Defaults to the value of
-	// OTLPGRPCAddr when empty.
+	// OBIEndpoint is the URL the agent tells OBI to push OTLP to
+	// (written into ObiConfigPath). MUST include a scheme — OBI's
+	// HTTP exporter parses the value as a net/url URL and rejects
+	// bare host:port with "first path segment cannot contain colon".
+	// Defaults to "http://<OTLPHTTPAddr>" when empty (OBI defaults to
+	// the HTTP exporter, so we point at our HTTP listener).
 	OBIEndpoint string
 	// MeterProvider supplies the OTel meter used for self-observability
 	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
@@ -111,8 +114,8 @@ func (c *Config) applyDefaults() {
 	if c.EventBuffer <= 0 {
 		c.EventBuffer = 4096
 	}
-	if c.OBIEndpoint == "" {
-		c.OBIEndpoint = c.OTLPGRPCAddr
+	if c.OBIEndpoint == "" && c.OTLPHTTPAddr != "" {
+		c.OBIEndpoint = "http://" + c.OTLPHTTPAddr
 	}
 }
 

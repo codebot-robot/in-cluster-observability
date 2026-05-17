@@ -46,9 +46,27 @@ spec:
         # Sibling OBI container: privileged, eBPF capture, OTLP -> localhost.
         - name: obi
           # Pinned per ADR-0010 / ADR-0018 (image tag, not Go module).
-          image: ghcr.io/open-telemetry/obi:v0.9.0
+          # Upstream OBI publishes to Docker Hub at otel/ebpf-instrument,
+          # not GHCR.
+          image: otel/ebpf-instrument:v0.9.0
           args:
             - --config=/etc/ollie/obi-config/config.yaml
+          env:
+            # OBI v0.9+ refuses to start without explicit feature flags.
+            # `network`     = L4 TCP metrics (ModuleL4TCP).
+            # `application` = L7 HTTP/gRPC spans and metrics
+            #                 (ModuleHTTP1/2/GRPC).
+            # `stats` (OBI's own self-obs) is intentionally omitted —
+            # the agent has its own ollie_capture_* counters.
+            - name: OTEL_EBPF_METRICS_FEATURES
+              value: "network,application"
+            # OBI's HTTP exporter requires a real URL (host:port alone
+            # parses as scheme:path and is rejected). Point at the
+            # agent's loopback OTLP HTTP listener.
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "http/protobuf"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://127.0.0.1:4318"
           resources:
             requests:
               cpu: 100m
@@ -59,9 +77,21 @@ spec:
           securityContext:
             capabilities:
               add:
-                - BPF
-                - PERFMON
-                - NET_ADMIN
+                - BPF        # load eBPF programs and create maps
+                - PERFMON    # perf events, ringbuffers
+                - NET_ADMIN  # several BPF program types (e.g. socket-filter
+                             # registration via SO_ATTACH_BPF)
+                - NET_RAW    # raw-socket access; OBI requires this for its
+                             # network-mode socket filter (warned explicitly
+                             # at startup if absent)
+                - SYS_ADMIN  # required by some BPF map operations and uprobe
+                             # attach paths on kernels that haven't fully
+                             # split the cap (Kind nodes share the host
+                             # kernel — Docker Desktop / older GKE host
+                             # kernels often still gate BPF object loads
+                             # behind SYS_ADMIN). Acceptable here because
+                             # OBI's container is the only place we accept
+                             # this; the agent container stays unprivileged.
               drop:
                 - ALL
             readOnlyRootFilesystem: true

@@ -87,6 +87,17 @@ func (w *Writer) Write(f File) (changed bool, err error) {
 		cleanup()
 		return false, fmt.Errorf("obiconfig: write temp: %w", err)
 	}
+	// os.CreateTemp gives 0600 — owner-readable only. Our writer (the
+	// ollie agent) and OBI's reader run in separate containers under
+	// different uids; OBI must be able to read the file regardless of
+	// the upstream image's runAsUser. World-readable is fine: the
+	// config is non-sensitive and the file lives on an emptyDir
+	// shared only between the two containers in this pod.
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return false, fmt.Errorf("obiconfig: chmod temp: %w", err)
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		cleanup()
