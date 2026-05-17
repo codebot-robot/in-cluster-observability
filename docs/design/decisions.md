@@ -271,6 +271,27 @@ Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misb
 
 ---
 
+## ADR-0014: POC removed early (amends ADR-0013 migration clause)
+
+**Status:** Accepted, 2026-05-17 (amends [ADR-0013](#adr-0013-module-layout--new-core-ap-root))
+
+**Context.** [ADR-0013](#adr-0013-module-layout--new-core-ap-root) anticipated a transitional period where the new `core/` AP root would coexist with the three POC roots (`/`, `opentelemetry/`, `obs/`) until parity, with a single cleanup PR at v1.0 GA (issue [#123](https://github.com/gke-labs/in-cluster-observability/issues/123)). Gari pushed back on this on 2026-05-17: carrying dead code through six milestones added noise without value — the design docs already capture everything the POC taught us, and the POC is preserved on `main` via git history.
+
+**Decision.** Remove the POC AP roots from the `rewrite` branch immediately, before v0.1 implementation begins. Issue [#123](https://github.com/gke-labs/in-cluster-observability/issues/123) was closed early.
+
+**Consequences.**
+- ✅ The `rewrite` branch reflects what we're building, not what we abandoned.
+- ✅ Less grep noise during implementation.
+- ✅ No "is this the new code or the old?" ambiguity.
+- ⚠️ Brief "no AP roots at all" state on the `rewrite` branch until v0.1 Foundation ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)) creates the new root. CI presubmits will either no-op or fail loudly until then. Accepted on a feature branch (not `main`).
+- ⚠️ The e2e harness pattern from the POC's `tests/e2e/` is gone; needs to be re-introduced when v0.1 testing work begins. Source remains on `main` for reference (`git show main:tests/e2e/harness.go`).
+
+**Supersedes.** ADR-0013's migration clause only (*"The existing POC roots (`/`, `opentelemetry/`, `obs/`) stay until the new code reaches parity, then get removed in a single cleanup PR"*). The structural decisions in ADR-0013 are otherwise unchanged.
+
+**Implemented in.** Commit `e5235a9` on the `rewrite` branch.
+
+---
+
 ## Open and superseded ADRs
 
 None yet. New ADRs are appended above this section.
