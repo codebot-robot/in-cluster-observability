@@ -47,7 +47,7 @@ flowchart LR
     agent -- push --> third
 ```
 
-**Agent (DaemonSet, one per node).** Runs the eBPF capture (via OBI through the [`pkg/capture`](obi-integration.md) adapter), enriches each event with K8s identity, writes to the local in-memory store (Prometheus tsdb HEAD + ring buffer per [`storage-and-query.md`](storage-and-query.md)), and invokes any registered push sinks. Maintains a long-lived bidirectional gRPC stream to the controller for `MonitoringSpec` and identity-cache updates.
+**Agent (DaemonSet pod, one per node — two containers).** The pod runs **OBI** as a sibling container (privileged: `CAP_BPF`/`hostPID`/host mounts) doing the eBPF capture and emitting OTLP to localhost, and **our agent** container (unprivileged) as an OTLP receiver that enriches each event with K8s identity, writes to the local in-memory store (Prometheus tsdb HEAD + ring buffer per [`storage-and-query.md`](storage-and-query.md)), and invokes any registered push sinks. The agent also writes OBI's discovery config (mounted as a shared volume) when `MonitoringSpec` changes. Detail in [`obi-integration.md`](obi-integration.md) (sibling-container shape per [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library)). The agent maintains a long-lived bidirectional gRPC stream to the controller for `MonitoringSpec` and identity-cache updates.
 
 **Controller (Deployment, leader-elected).** Watches `TrafficMonitor` and `ClusterTrafficPolicy` CRDs. Watches Pods, Services, EndpointSlices (the canonical K8s informer per [ADR-0009](decisions.md#adr-0009-informer-custody--hybrid)). Computes per-node `MonitoringSpec` and pushes to agents over gRPC. Runs the validating admission webhook for the CRDs. Detail in [`control-plane.md`](control-plane.md).
 
@@ -129,13 +129,13 @@ Key facts:
 - **CRDs:** cluster-scoped install, not namespace-scoped.
 - **TLS:** cert-manager issues certificates for the query server's HTTPS surface (required by `APIService`) and for the validating webhook.
 - **RBAC:** least-privilege per component. Agent reads Pods/Nodes/Kubelet; controller reads/writes CRDs + reads Pods/Services/EndpointSlices; query server reads nothing from the K8s API. Detail in [`operations.md`](operations.md).
-- **Agent privileges:** `CAP_BPF` + `CAP_PERFMON` + `CAP_NET_ADMIN`; `hostPID: true`; mounts `/sys/fs/bpf`, `/proc`, `/sys/kernel/debug` read-only. **Not** `CAP_SYS_ADMIN` if avoidable. See [`operations.md`](operations.md) for the threat model.
+- **Privileges, by container:** the `obi` sibling container holds `CAP_BPF` + `CAP_PERFMON` + `CAP_NET_ADMIN` + `hostPID: true` + host mounts (`/sys/fs/bpf`, `/proc`, `/sys/kernel/debug`). The `agent` container is **unprivileged**, drops all capabilities, runs as `runAsNonRoot: true`. **Neither needs `CAP_SYS_ADMIN`.** See [`operations.md`](operations.md) for the threat model.
 
 ## 5. Tech stack
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| eBPF library | `go.opentelemetry.io/obi` ([ADR-0001](decisions.md#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi)) | OTLP-native; protocol coverage already there; K8s identity built-in |
+| eBPF data plane | OBI as sibling container ([ADR-0001](decisions.md#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi), [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library)) | OTLP-native wire to agent; OBI is the privileged process; image-tag version pinning |
 | In-cluster store | `github.com/prometheus/prometheus/tsdb` ([ADR-0002](decisions.md#adr-0002-in-cluster-store--prometheus-tsdb-head-block--parallel-ring-buffer)) | HEAD block + WAL embeddable; Thanos-validated |
 | K8s client | `k8s.io/client-go` (informer + lease/leaderelection) | Standard |
 | CRDs | kubebuilder markers + `sigs.k8s.io/controller-runtime` | Standard |

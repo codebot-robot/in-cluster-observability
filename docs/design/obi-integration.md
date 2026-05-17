@@ -1,232 +1,237 @@
 # OBI Integration
 
-**Status:** Draft, 2026-05-17
+**Status:** Draft, 2026-05-17 (rewritten for sibling-container model per [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library))
 **Owners:** TBD
 
-This document specifies how the project consumes OpenTelemetry eBPF Instrumentation (OBI, `go.opentelemetry.io/obi`). OBI is the deepest part of the stack and the only direct dependency that explicitly promises [breaking changes between minor versions](https://opentelemetry.io/blog/2026/obi-goals/). Insulating that churn is what `pkg/capture` exists to do.
+This document specifies how the project consumes OpenTelemetry eBPF Instrumentation (OBI, `go.opentelemetry.io/obi`). The original ADR-0010 anticipated embedding OBI as a Go library; that approach was abandoned when probing OBI v0.9.0 revealed the public Go API (`pkg/ebpf`) is a low-level building-block surface with no documented embedder path, and that OBI's supported deployment model is **as a standalone binary that emits OTLP**.
 
-Background decisions: [ADR-0001](decisions.md#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi) (we chose OBI), [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter) (we wrap it).
+Under the current model OBI runs as a **sibling container** in the agent DaemonSet pod, configured to push OTLP to our agent on localhost. Our `pkg/capture` package is an OTLP receiver and an OBI-config writer, not a Go-API wrapper.
+
+Background: [ADR-0001](decisions.md#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi) (OBI is the eBPF library), [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter) (version pinning principle), [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library) (sibling-container shape).
 
 ## 1. Goals and non-goals
 
 **Goals:**
-- One file's worth of code touches OBI APIs directly. Everything else in the project depends on `pkg/capture`.
-- OBI version bumps are a single PR, gated by a contract-test suite.
-- Embedders ([`public-api.md`](public-api.md)) never see OBI types.
-- New protocol modules OBI adds can be exposed in `pkg/capture` with minimal change.
+- Consume OBI the way its maintainers intend it to be consumed.
+- Version-pin OBI so version bumps are bounded, intentional events.
+- Keep the OBI image as the sole privileged process; agent runs unprivileged.
+- Expose a `pkg/capture.Manager` interface to the rest of the project that hides the sibling-container details — embedders see a uniform "capture" surface whether they run with OBI, a fake, or a future alternative.
 
 **Non-goals:**
-- We do not aim to "abstract eBPF" generically. The adapter is specifically for OBI's shape; if we ever switch eBPF libraries, the adapter is rewritten, not extended.
-- We do not aim to support multiple OBI versions concurrently. One pinned version at a time per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter).
+- We do NOT embed OBI as a Go library.
+- We do NOT vendor OBI's internal packages (`pkg/appolly/instrumenter.go`, etc.).
+- We do NOT proxy OBI's full configuration surface — only the subset we need to control per `TrafficMonitor` / `ClusterTrafficPolicy` CRDs.
+- We do NOT fork the OBI image except as the absolute last resort (criteria in §7).
 
-## 2. The `pkg/capture` adapter
+## 2. Deployment topology
 
-A single Go package, ~600–800 LoC, the only place that imports `go.opentelemetry.io/obi/*`.
+Each agent DaemonSet pod has two containers:
 
-### 2.1 Public types
-
-```go
-// Package capture wraps OBI behind a stable, project-owned interface.
-//
-// Stability: Stable (the interface). The contents of Config and Event
-// may grow with backward-compatible additions; the existing fields are stable.
-package capture
-
-// Manager is the entry point. One per agent process.
-type Manager interface {
-    // Lifecycle.
-    Start(ctx context.Context) error
-    Stop(ctx context.Context) error
-
-    // Per-PID monitoring control. Idempotent.
-    AllowPID(pid uint32, spec PIDSpec) error
-    BlockPID(pid uint32) error
-
-    // Protocol module control. Idempotent.
-    EnableModule(m Module, cfg ModuleConfig) error
-    DisableModule(m Module) error
-    EnabledModules() []Module
-
-    // Event delivery. Records flow on this channel; closed on Stop.
-    Events() <-chan Event
-
-    // Enrichment hook (see public-api.md §4).
-    AddEnricher(Enricher)
-
-    // Self-observability handle.
-    Metrics() Metrics
-}
-
-type Config struct {
-    Logger      logr.Logger
-    KubeletAddr string         // "https://127.0.0.1:10250" by default
-    ProcPath    string         // "/proc" by default
-    BpfFSPath   string         // "/sys/fs/bpf" by default
-    EventBuffer int            // Events() channel size; default 4096
-}
-
-func New(Config) (Manager, error)
-
-// Per-PID monitoring spec; controller computes and pushes via gRPC.
-type PIDSpec struct {
-    Protocols []Module     // which OBI tracers to attach for this PID
-    Sampling  Sampling     // per-PID sampling override (optional)
-    Labels    map[string]string  // additional labels attached at enrich time
-}
-
-// Module is our enum over OBI's protocol tracers.
-type Module uint16
-const (
-    ModuleL4TCP Module = iota + 1
-    ModuleHTTP1
-    ModuleHTTP2
-    ModuleGRPC
-    ModuleTLSGoCryptoTLS
-    ModuleTLSOpenSSL
-    ModuleSQLPostgres
-    ModuleSQLMySQL
-    ModuleSQLMongoDB
-    ModuleSQLRedis
-    ModuleGenAI       // OpenAI/Anthropic/Gemini (per OBI)
-    // ModuleKafka — roadmap
-    // ModuleA2A — initially captured via ModuleHTTP*, dedicated module later
-)
-
-// Event is the project-owned shape of a single record from OBI.
-// Translated from OBI's internal types by the adapter; OBI types do not leak.
-type Event struct {
-    Kind       EventKind   // Metric | Span | Edge
-    Timestamp  time.Time
-    PID        uint32
-    Module     Module
-    // Discriminated union — exactly one of the following is set.
-    Metric *MetricEvent
-    Span   *SpanEvent
-    Edge   *EdgeEvent
-}
+```
+┌──────────────────────── Pod: ollie-agent ────────────────────────┐
+│                                                                  │
+│  ┌──────────────────┐                  ┌────────────────────┐    │
+│  │ container: obi   │                  │ container: agent   │    │
+│  │ (upstream image) │ ─── OTLP/gRPC ─► │ (ollie image)      │    │
+│  │ CAP_BPF,         │   127.0.0.1:4317 │ unprivileged       │    │
+│  │ CAP_PERFMON,     │                  │ runAsNonRoot       │    │
+│  │ hostPID,         │                  │                    │    │
+│  │ host mounts      │                  │ OTLP receiver →    │    │
+│  │                  │                  │   enricher →       │    │
+│  │ Watches PIDs,    │                  │   store → sinks    │    │
+│  │ attaches eBPF,   │                  │                    │    │
+│  │ emits OTLP       │                  │ Writes OBI config  │    │
+│  └──────────────────┘                  │ via shared volume  │    │
+│         ▲                              └────────────────────┘    │
+│         │                                       │                │
+│         └────── config reload (SIGHUP) ─────────┘                │
+│                                                                  │
+│  Shared volume: emptyDir mounted at /etc/ollie/obi-config/       │
+│  Host volumes (OBI only): /sys/fs/bpf, /proc, /sys/kernel/debug  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 What's hidden
+Key properties:
 
-The adapter **never** exposes:
-- OBI's `Tracer`, `ProcessTracer`, or `Programs` types directly.
-- OBI's internal config struct or its YAML schema.
-- Raw `cilium/ebpf` `*ebpf.Program` or `*ebpf.Map` handles.
-- OBI's metric/span proto types (we translate to `Event`).
+- **Network namespace shared.** OBI pushes OTLP to `127.0.0.1:4317` (gRPC) or `:4318` (HTTP); our agent listens on those ports. No service mesh, no cross-pod traffic.
+- **Lifecycle coupled.** Pod restart restarts both containers. If OBI's container dies repeatedly, the whole pod backs off — k8s handles it.
+- **Privileges quarantined.** Only `obi` runs with `CAP_BPF` + `CAP_PERFMON` + `CAP_NET_ADMIN` + `hostPID: true` + host mounts (`/sys/fs/bpf`, `/proc` ro, `/sys/kernel/debug` ro). The `agent` container drops all capabilities and runs as `runAsNonRoot: true`, `runAsUser: 65532`.
+- **Config flow.** Agent writes OBI's discovery + protocol configuration to a shared `emptyDir` volume mounted at `/etc/ollie/obi-config/`. Agent signals OBI to reload by sending `SIGHUP` via shared process namespace (or via a small reload-signal file plus OBI's config watcher — see §3.4).
 
-### 2.3 What's mapped
+The full DaemonSet manifest lands in v0.2 ([#68](https://github.com/gke-labs/in-cluster-observability/issues/68) is updated in v0.2 to add the second container; v0.1 ships agent-only as a stub).
 
-The adapter is mostly a translation table. Key mappings:
+## 3. The `pkg/capture` surface
 
-| OBI surface | Our adapter |
-|---|---|
-| `obi.Config` | `capture.Config` (subset; defaults filled in) |
-| `obiprogram.ProcessTracer.AllowPID(pid)` | `Manager.AllowPID(pid, spec)` (we also remember the spec) |
-| `obi.Programs[HTTP1Tracer]` toggle | `Manager.EnableModule(ModuleHTTP1, cfg)` |
-| OBI metric output (OTLP-shaped) | translated to `Event{Kind: Metric, Metric: …}` |
-| OBI span output (OTLP-shaped) | translated to `Event{Kind: Span, Span: …}` |
-| OBI's K8s identity attrs on records | passed through unmodified into `Event` attrs (we extend in enricher) |
-| OBI ring-buffer reader | hidden; we feed our `Events()` channel from it |
-| OBI panic / kernel-verifier failures | recovered, surfaced via `Manager.Metrics()` and a `Module-degraded` Event |
+The `Manager` interface from v0.1 (defined in [`docs/design/data-plane.md`](data-plane.md) and v0.1 commit `b3bd6d8`) is unchanged. Its **implementation** changes.
 
-## 3. Version pinning policy
+### 3.1 What backs Manager methods
 
-Per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter):
+| Method | Old (embedded) | New (sibling) |
+|---|---|---|
+| `Start(ctx)` | Load OBI programs via Go API | Start OTLP gRPC + HTTP receivers on `127.0.0.1:4317`/`:4318` |
+| `Stop(ctx)` | Detach OBI; close ringbuffer | Drain receivers; close Events channel |
+| `AllowPID(pid, spec)` | Call OBI's Go `AllowPID` | Update OBI's discovery config (add PID/selector); signal reload |
+| `BlockPID(pid)` | Call OBI's Go `BlockPID` | Update OBI's discovery config (remove); signal reload |
+| `EnableModule(mod, cfg)` | Toggle OBI Tracer in the live ProcessTracer | Update OBI's protocol section in config; signal reload |
+| `DisableModule(mod)` | Same | Same |
+| `Events()` | Channel fed by OBI ringbuffer goroutine | Channel fed by OTLP receiver handlers |
+| `AddEnricher(e)` | Unchanged | Unchanged |
+| `Metrics()` | Unchanged | Unchanged |
 
-- `go.mod` pins **one OBI minor at a time** with an exact version (no `^` or `~`).
-- OBI bumps live in their own PR. The PR is constrained to touch:
-  - `go.mod` / `go.sum`
-  - `pkg/capture/*.go` (adapter)
-  - `tests/contract/obi/*` (contract tests, when they change)
-  - `docs/design/obi-integration.md` (this file, if the surface changes)
-  - `docs/design/decisions.md` (if a new ADR is needed)
+The public surface stays stable — Manager continues to be `// Stability: Experimental` until OBI hits 1.0, but only because OBI itself is unstable, not because our interface is.
+
+### 3.2 OTLP receivers
+
+Two receivers on the agent's loopback:
+
+- `:4317` — OTLP gRPC, served by `go.opentelemetry.io/otel/sdk/...` infrastructure or, more simply, by `google.golang.org/grpc` with handlers registered for `ExportMetricsServiceRequest`, `ExportTraceServiceRequest`, `ExportLogsServiceRequest`.
+- `:4318` — OTLP HTTP, served by a small `net/http` mux at `/v1/{traces,metrics,logs}`.
+
+OBI is configured to push to whichever the operator selects (gRPC by default). Agent listens on both so embedders can pick.
+
+### 3.3 Configuring OBI
+
+OBI's config file format is YAML; the relevant subset for our purposes:
+
+```yaml
+# /etc/ollie/obi-config/config.yaml (written by agent, read by OBI)
+otel_metrics_export:
+  endpoint: 127.0.0.1:4317
+otel_traces_export:
+  endpoint: 127.0.0.1:4317
+attributes:
+  kubernetes:
+    enable: false        # per ADR-0017.4 — we attribute K8s identity ourselves
+routes:
+  unmatched: wildcard    # leaves path templating to us (per #605, v0.6)
+discovery:
+  services:              # populated from MonitoringSpec
+    - name: <workload>
+      open_ports: [...]
+      exe_path_regexp: ...
+      # OR pid_namespace: ...
+```
+
+The agent writes this on `MonitoringSpec` changes from the controller. The controller's per-pod `MonitoringSpec` resolves to a `discovery.services` entry per pod.
+
+### 3.4 Reload mechanism
+
+Two viable options; pick during implementation:
+
+- **SIGHUP:** the agent sends SIGHUP to the OBI process. Requires `shareProcessNamespace: true` on the pod. Cleanest, but `shareProcessNamespace` has security implications worth weighing.
+- **Config file watch:** OBI watches its config file (it does, per `pkg/config/...`). Agent writes-then-renames atomically; OBI picks up. No shared process namespace needed.
+
+Defaulting to file-watch reload in v0.2 to avoid `shareProcessNamespace`. SIGHUP is the fallback if OBI's file watcher proves flaky.
+
+## 4. Translating OBI's OTLP → `capture.Event`
+
+OBI emits standard OTLP — `ExportMetricsServiceRequest` and `ExportTraceServiceRequest` messages. Our OTLP receiver translates each to a stream of `capture.Event`s.
+
+Per [ADR-0017.5](decisions.md#175-v02-metricspan-field-set--minimal-http-focused), v0.2 captures the **minimal** field set:
+
+- L4 TCP metrics → `Event{Kind: Metric, Metric: &MetricEvent{name, value, attrs: {peer_ip, peer_port, direction}}}`
+- HTTP/1.1 spans → `Event{Kind: Span, Span: &SpanEvent{method, path_raw, status, duration_ns, peer_ip, peer_port}}`
+- HTTP/1.1 metrics (counter, histogram) → `Event{Kind: Metric, ...}`
+- Per [ADR-0017.4](decisions.md#174-strip-obis-built-in-kubernetes-attribution), we **drop OBI's `k8s.*` resource attributes** at translation time (we'll re-attribute via `pkg/topology` in v0.3).
+
+The translation lives in `pkg/capture/otlp_translate.go`; tested via contract tests (§6).
+
+## 5. Per-PID enable / disable
+
+`Manager.AllowPID(pid, spec)`:
+
+1. Update the in-memory `pidSpecs[pid] = spec` (idempotent).
+2. Compute the desired `discovery.services` list for the OBI config from all current `pidSpecs`.
+3. If the computed list differs from the on-disk OBI config, write a new config file atomically and signal reload.
+
+`Manager.BlockPID(pid)`:
+
+1. Delete from `pidSpecs`.
+2. Recompute and write if changed.
+
+Idempotency is free because we always rewrite from the current `pidSpecs` map. Batching: a "reload coalescer" debounces rapid Allow/Block sequences over a 500 ms window so a workload rollout doesn't thrash OBI's reload.
+
+## 6. Contract test suite
+
+Location: `tests/contract/obi/`. Purpose: freeze our **OTLP→Event** translation against pinned inputs so OBI bumps can't silently change our output.
+
+### 6.1 Fixture format
+
+Each test case has:
+
+- An **input fixture** — a recorded OTLP `ExportXxxServiceRequest` payload (binary protobuf) captured from a real OBI run against a known canary workload, stored under `tests/contract/obi/testdata/<case>/input.binpb`.
+- A **golden output** — the expected sequence of `capture.Event` (JSON) after translation, stored under `tests/contract/obi/testdata/<case>/golden.json`.
+
+Test driver loads the fixture, feeds it through `pkg/capture`'s translator, captures the actual Event stream, and diffs against the golden. `go test -update` regenerates goldens.
+
+### 6.2 Initial cases (v0.2 #74)
+
+- `l4-basic` — TCP bytes + connection counters for one workload.
+- `http1-basic` — HTTP/1.1 request span + counter + histogram.
+- `allowpid-lifecycle` — AllowPID then BlockPID; OBI's config changes; agent receives expected events through each phase.
+- `module-degraded` — synthetic "OBI container dies" scenario; agent emits `Event{Kind: ModuleDegraded}` after the configured retry budget.
+
+Fixtures are regenerated from a real OBI run on each OBI image bump; the regeneration recipe lives in `tests/contract/obi/REGENERATE.md`.
+
+### 6.3 What contract tests do not cover
+
+- They are **not** an end-to-end test of OBI itself — we trust OBI's upstream test suite for that.
+- They are not a kernel-level test. The fixtures abstract over the kernel; the agent doesn't load eBPF.
+- E2E tests covering "real OBI + agent + workload" live in `tests/e2e/` (lands with v0.5).
+
+## 7. Version pinning policy
+
+Per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter) (principle) + [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library) (mechanism):
+
+- Pin a specific OBI image tag in the agent DaemonSet manifest and Helm values (e.g. `ghcr.io/open-telemetry/obi:v0.9.0`).
+- Image bumps live in their own PR. The PR is constrained to:
+  - `k8s/daemonset.yaml` (image tag bump)
+  - `helm/ollie/values.yaml` (when Helm chart lands in v1.0)
+  - `tests/contract/obi/testdata/*` (regenerated fixtures)
+  - `docs/design/decisions.md` (only if the bump requires a new ADR for behavior changes)
 - The PR description must include:
   - OBI release notes summary
-  - List of any breaking changes the adapter absorbs
-  - Contract-test diff (additions / removals)
-- The contract test suite (§4) must pass without flakiness retries.
+  - Any config-shape changes (OBI's config keys we use)
+  - Contract-test diff (golden additions / changes)
+- Contract test suite must pass without flakiness retries.
 
-If a bump requires breaking changes in `pkg/capture`'s public surface, that's a MINOR-version bump for this module until we hit 1.0, MAJOR after. Embedders feel it; the rest of the module does not.
+If a bump introduces a config-shape change OBI made (e.g. they rename `attributes.kubernetes.enable` to something else), the same PR updates our config-writer. That stays in our repo, but the change is small and bounded.
 
-## 4. Contract test suite
+## 8. Fork-vs-upstream policy
 
-Location: `tests/contract/obi/`. Purpose: **freeze the adapter's behavior** against recorded inputs so OBI changes can't silently regress us.
+When OBI lacks something we need or has a bug:
 
-### 4.1 What contract tests are
+1. **First, open an upstream issue.**
+2. **Next, contribute a PR upstream.** This is the default.
+3. **If urgency demands and upstream is slow:** maintain a downstream image build, applying patches before publishing. Living in a `images/obi-patched/Dockerfile` that pulls upstream, applies the patch, and re-publishes under our registry.
+4. **Fork OBI** only if a critical issue sits unaddressed for **two full OBI release cycles** (~two minor releases). A fork is an ADR-worthy decision; the cost (we now own a fork of an active project) is high.
 
-Each test has:
-- **An input fixture** — either a recorded set of kernel events (binary, captured once and committed) or a synthetic traffic generator (an in-process httptest server, a tiny gRPC server, etc.).
-- **Expected `Event`s** — the exact `Event` stream the adapter must emit for that input, captured as a `golden.json` file.
-- A test driver that wires the adapter against a hermetic OBI instance, runs the input, captures the actual `Event` stream, and diffs against `golden.json`.
+We never silently fork. Path is always: issue → PR → patched image → fork, with explicit gates between each step.
 
-Tests use Go's `testing` and `testdata/` conventions; goldens are regenerated by running with `-update`.
+## 9. Failure modes
 
-### 4.2 Test categories
-
-| Category | What it covers | Frequency |
+| Failure | Detection | Response |
 |---|---|---|
-| **Translation** | OBI event → `Event` field mapping for every event shape we surface | Per OBI bump |
-| **PID lifecycle** | AllowPID/BlockPID idempotency, double-add, BlockPID-during-attach race | Per OBI bump |
-| **Module toggle** | Enable/Disable each `Module`, verify only matching events flow | Per OBI bump |
-| **Panic recovery** | Force OBI panic (kernel-verifier denial fixture) and assert agent stays up, `Module-degraded` Event emitted | Per OBI bump |
-| **Backpressure** | Saturate the `Events()` channel; assert metric counter ticks; no drops in OBI itself | Per OBI bump |
-| **Schema stability** | Every `Event` field maps to a documented OTel semconv key | Per release |
-| **Hermetic kernel** | Run inside a lightweight VM (a small QEMU image, kernel 6.x) to verify CO-RE relocation works | Nightly + per OBI bump |
+| OBI container crashes once | k8s container status | Pod restarts the container; agent emits `ollie_capture_obi_restarts_total` |
+| OBI container crash-loops | k8s container status; OBI's restart count | Pod backs off (k8s default); agent emits `ModuleDegraded` event and surfaces in pod status |
+| OTLP connection refused (OBI not up) | gRPC connect error | Agent retries with backoff; logs at warning; metric ticks |
+| OBI config rejected | OBI logs to stderr; non-zero exit | Agent reads OBI's last log lines and surfaces in `AgentStatus` to the controller |
+| Loopback OTLP slow | receiver-side latency | Agent buffers; if buffer fills, drops with `ollie_capture_events_dropped_total{reason="backpressure"}` |
+| OBI version mismatch with our config writer | OBI rejects unknown keys | Surfaced via OBI's exit; gated by contract tests, should never reach prod |
 
-### 4.3 What contract tests are not
+## 10. Adapter implementation notes
 
-- They are not a substitute for **end-to-end tests** (those live in [`testing-and-benchmarks.md`](testing-and-benchmarks.md)).
-- They are not micro-benchmarks (separate bench harness).
-- They do not test OBI itself — we trust OBI's upstream test suite for that.
+Non-normative; intended to make the first v0.2 PR faster.
 
-## 5. Module roadmap and gap policy
-
-OBI's protocol coverage as of v0.8 (April 2026): HTTP/1.1, HTTP/2, gRPC, SQL (PostgreSQL/pgx, MySQL, MongoDB, Redis, Couchbase), GenAI (OpenAI, Anthropic Claude, Google Gemini). 2026 OBI roadmap: MQTT, AMQP, NATS, Redis pub/sub, MongoDB extensions, cloud SDK instrumentation.
-
-Our protocol roadmap and the policy for gaps:
-
-| Protocol | OBI status | Our plan |
-|---|---|---|
-| HTTP/1.1, HTTP/2, gRPC | Shipped | Expose as `ModuleHTTP1`, `ModuleHTTP2`, `ModuleGRPC` from v1 |
-| TLS — Go `crypto/tls`, OpenSSL | Shipped | Expose as `ModuleTLSGoCryptoTLS`, `ModuleTLSOpenSSL` from v1 |
-| TLS — BoringSSL | Shipped (limited) | Expose with the OBI-supported subset documented |
-| TLS — rustls, NSS, Java JSSE | Not in OBI | Roadmap; see [`roadmap.md`](roadmap.md) |
-| SQL parsers | Shipped | Not in v1 default protocol set (off the requirements path); expose for embedders who want them |
-| GenAI (OpenAI/Claude/Gemini) | Shipped | Expose as `ModuleGenAI` from v1 — directly serves the "AI agents calling AI agents" use case |
-| A2A | Captured via HTTP today | `ModuleA2A` semantic layer to be added once A2A on-wire conventions stabilize |
-| Kafka | Not in OBI (roadmap) | Wait for OBI; contribute upstream if we hit a need |
-
-### Fork-vs-upstream criteria
-
-When OBI lacks something we need:
-
-1. **First, open an upstream issue** in `open-telemetry/opentelemetry-ebpf-instrumentation`.
-2. **Next, attempt to contribute** the protocol module / fix upstream. This is the default.
-3. **Maintain a downstream patch** if upstream needs more than one OBI release cycle to land. The patch lives in `pkg/capture/patches/` and is applied to the vendored OBI source at build time; the patch's existence is announced in release notes.
-4. **Fork OBI** only if a critical hole sits unmerged after **two full OBI release cycles** (~two minor releases). A fork is an ADR-worthy decision and requires explicit user sign-off.
-
-We never silently fork. The path is always: issue → PR → patch → fork, with explicit gates between each step.
-
-## 6. Operational concerns
-
-- **Vendoring.** We use Go modules, not vendor/. OBI's checked-in eBPF object files come along via `go mod` like any other Go-embedded asset.
-- **eBPF generation.** OBI ships its own `bpf2go`-generated bindings. We do **not** regenerate them in our build. If we add our own `.bpf.c` (rare), it lives in `internal/bpf/` and follows the repo's existing `bpf2go` convention (see [`AGENTS.md`](../../AGENTS.md)).
-- **CO-RE / BTF.** Both required. The adapter fails fast at startup if BTF is unavailable (per [ADR-0006](decisions.md#adr-0006-kerneldistro-target--cos-125-kernel-6x-btfco-re-required) we don't support non-BTF kernels).
-- **Architecture support.** amd64 and arm64. We CI both per [`testing-and-benchmarks.md`](testing-and-benchmarks.md).
-- **Permissions.** OBI requires `CAP_BPF` + `CAP_PERFMON`. Some uprobe attach paths historically needed `CAP_SYS_ADMIN`; we audit and document any actual need in [`operations.md`](operations.md).
-
-## 7. Adapter implementation notes
-
-Non-normative; intended to make the first cut faster.
-
-- Single goroutine reads OBI's ringbuffer; per-event translation happens inline (no per-event allocations for small events; use `sync.Pool` for `Event` if profiling shows churn).
-- `Events()` channel is closed via context cancel; back-pressure is signaled by full-channel writes incrementing `capture.dropped_events_total`.
-- `AllowPID` maintains a `map[uint32]PIDSpec` under a RWMutex; module toggles are diffed against the spec on each call.
-- Panic recovery wraps the OBI ringbuffer reader and the per-event handler; a recovered panic disables the responsible module (best effort — OBI doesn't always make this localizable) and emits a `Module-degraded` event.
-- Module `EnableModule(ModuleTLSGoCryptoTLS, …)` performs the uprobe attach lazily on first matching process exec; the adapter handles process-watch via OBI's own facilities.
+- OTLP receivers use `google.golang.org/grpc` + the generated OTLP service stubs (or the OTel SDK's collector exporter as a reference). For v0.2 we go direct gRPC to avoid pulling in the full Collector SDK.
+- The reload coalescer is a small goroutine reading from a buffered channel with a 500 ms debounce.
+- Config marshaling uses `gopkg.in/yaml.v3` (or `sigs.k8s.io/yaml` if we want JSON compatibility — TBD).
+- The `pkg/capture` package gains a `Config.ObiSocketPath` field for the shared volume path; defaults to `/etc/ollie/obi-config/config.yaml`.
+- No OBI Go imports anywhere in our module. `internal/archtest` enforces this — the boundary check stays identical because the import path is the same; it's just that nothing imports it now.
 
 ## Open questions
 
-1. **Hermetic kernel test image.** Do we maintain our own minimal QEMU image, or piggy-back on OBI's CI? Leaning toward the latter for cost; revisit when CI ownership solidifies.
-2. **Concurrent OBI versions in dev.** When prototyping an OBI bump, would a `go.mod` `replace` directive in the adapter package be useful, or should bumps always be full-repo? Likely full-repo for simplicity.
-3. **A2A dedicated module.** When (not if) we add a dedicated `ModuleA2A`, it likely contributes back as an OBI protocol module rather than living in our adapter. Decision deferred to when A2A's on-wire conventions are stable enough to instrument.
+1. **Reload mechanism final pick.** File-watch is the v0.2 default; revisit if OBI's watcher proves unreliable in practice.
+2. **OBI's discovery config schema stability.** OBI's config evolves between minors; we may want to wrap our writer in a versioned interface so a single switch handles OBI N vs N+1 during transition.
+3. **OBI's own `/metrics` endpoint.** OBI exposes Prometheus metrics for its internal state. We should scrape these into our self-observability surface to make OBI's health visible to operators. v0.3 work.
+4. **Multi-arch OBI image availability.** Confirm upstream publishes arm64 + amd64 image tags for every minor (per [`testing-and-benchmarks.md`](testing-and-benchmarks.md) §7).

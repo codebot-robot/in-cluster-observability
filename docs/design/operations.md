@@ -93,40 +93,74 @@ rules:
     verbs: [get, list]
 ```
 
-## 3. Kernel privileges (agent)
+## 3. Kernel privileges (sibling-container model)
 
-The agent is the only component with kernel privileges. Per [`data-plane.md`](data-plane.md) §7:
+Per [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), the agent DaemonSet pod runs two containers. Kernel privileges live **only on the OBI sibling container**.
 
-| Capability | Why |
+### 3.1 `obi` container (privileged)
+
+| Capability / mount | Why |
 |---|---|
 | `CAP_BPF` | load eBPF programs, create maps |
 | `CAP_PERFMON` | access perf events, ringbuffers |
 | `CAP_NET_ADMIN` | required for some BPF program types (e.g. socket-filter) |
-| `hostPID: true` | required to attach uprobes to PIDs in other pod namespaces |
+| `hostPID: true` (set on pod) | required to attach uprobes to PIDs in other pod namespaces |
+| Mount `/sys/fs/bpf` (rw) | map pinning |
+| Mount `/proc` (ro) | per-PID inspection |
+| Mount `/sys/kernel/debug` (ro) | BTF |
+| `runAsUser: 0` | eBPF load requires uid 0 in the user namespace |
+| `readOnlyRootFilesystem: true` | hardening |
 
-We deliberately **do not request `CAP_SYS_ADMIN`**. Kernel ≥ 5.8 split the relevant capabilities; using only the narrow caps reduces blast radius. If a specific OBI feature requires `CAP_SYS_ADMIN`, we either fork around it per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter) or document and gate the feature as opt-in.
+We deliberately **do not request `CAP_SYS_ADMIN`**. Kernel ≥ 5.8 split the relevant capabilities; using only the narrow caps reduces blast radius.
 
-Read-only host mounts: `/sys/fs/bpf` (rw, for map pinning), `/proc` (ro), `/sys/kernel/debug` (ro, for BTF).
+### 3.2 `agent` container (unprivileged)
 
-`readOnlyRootFilesystem: true` on the container; `runAsUser: 0` (eBPF load requires uid 0 in the user namespace).
+| Setting | Value |
+|---|---|
+| Capabilities | drop ALL, add none |
+| `allowPrivilegeEscalation` | `false` |
+| `readOnlyRootFilesystem` | `true` |
+| `runAsNonRoot` | `true` |
+| `runAsUser` | `65532` |
+| Mounts | shared OBI config volume (rw), store WAL volume (rw), agent config ConfigMap (ro) |
+
+The agent has **no `CAP_BPF`, no `hostPID`, no host mounts**. It's a pure userland process listening on loopback OTLP and writing to a shared volume.
 
 ## 4. Security / threat model
 
 A node-privileged DaemonSet that decrypts TLS payloads is a high-value target. This section makes the threat model explicit.
 
-### 4.1 What an attacker who compromises the agent gains
+### 4.1 What an attacker gains by container, sibling-container model
 
-If the agent process is compromised (RCE in the agent binary or any dependency it loads at runtime):
+Per [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), the privileged surface is quarantined to the `obi` container. The threat model splits accordingly.
 
-- **Read access to all traffic on the node**, including TLS-decrypted L7 for supported libraries, on every pod running there. This is the worst-case bear we're hugging.
-- **Ability to load arbitrary eBPF programs** (within `CAP_BPF` + `CAP_PERFMON`). Modern eBPF verifiers prevent kernel memory access, but this still enables sophisticated side-channels.
-- **Ability to read `/proc/<pid>/*`** for every PID on the node — environment variables, command lines, mount namespaces.
-- **Ability to call Kubelet on the node** with the SA's privileges (`nodes/proxy`, which is broad).
+**4.1.1 Attacker compromises the `obi` sibling container** (the high-value target):
 
-What they **do not** gain directly:
-- K8s API write access (agent has read-only outside of its own SAR/SSAR-tier resources).
-- Cross-node access (no inter-node call paths from the agent; agent only talks to controller and configured sinks).
-- Persistent foothold beyond the pod lifecycle (read-only root FS; the WAL volume is the only writable space).
+- **Read access to all traffic on the node**, including TLS-decrypted L7 for supported libraries.
+- **Ability to load arbitrary eBPF programs** (within `CAP_BPF` + `CAP_PERFMON`).
+- **Ability to read `/proc/<pid>/*`** for every PID on the node.
+
+But: the OBI image is maintained by the OBI community (we don't write it). Our supply chain for OBI is the upstream tag we pin. Mitigations rely on OBI's hardening, image signing (verified at pull), and our process for OBI version bumps.
+
+What they **do not** gain even via OBI compromise:
+- Direct K8s API write access (OBI does not hold K8s write creds; only the agent SA does, and that's also read-only).
+- Cross-node access.
+- Persistent foothold beyond pod lifecycle (read-only root FS).
+
+**4.1.2 Attacker compromises the `agent` container** (our binary):
+
+This is what was previously framed as "agent compromise." Under the sibling model the agent runs unprivileged — what an attacker gets is **dramatically reduced**:
+
+- **Access to recently captured data in the in-cluster store**, via the OTLP receiver's already-received batches and the tsdb HEAD on the WAL volume. Bounded to the retention window (10 min default).
+- **Ability to write to OBI's config volume** — could turn TLS capture on for every workload, change sampling, etc. Effective only after OBI reloads, and visible in OBI's startup logs.
+- **Kubelet `nodes/proxy` access** via the agent's SA (same as before).
+
+What they **do not** gain via agent compromise:
+- No `CAP_BPF`, no kernel reads, no direct PID inspection beyond what OTLP records already contain.
+- No live traffic — they can only see what OBI has already sent and we've stored.
+- No persistent foothold (read-only root FS; only the OBI-config volume and store volume are writable).
+
+This is a meaningful reduction in worst-case blast radius from the original single-container design.
 
 ### 4.2 What an attacker who compromises the controller gains
 
@@ -145,7 +179,8 @@ The controller does **not** have direct access to captured data; that lives on t
 
 | Concern | Mitigation |
 |---|---|
-| Agent compromise → cluster-wide TLS read | Default `ClusterTrafficPolicy` has TLS **disabled**; opt-in per workload. Operators can refuse to enable TLS capture cluster-wide. |
+| OBI compromise → cluster-wide TLS read | Default `ClusterTrafficPolicy` has TLS **disabled**; opt-in per workload. Operators can refuse to enable TLS capture cluster-wide. OBI image signing verified at pull (when supported); pinned tag never `latest`. |
+| Agent compromise → poison OBI config | OBI's config volume is writable only by the agent SA's pod; agent compromise to OBI compromise requires another exploit. Agent rewrites of OBI config show in OBI's startup/reload logs and via `ollie_capture_obi_reloads_total`. |
 | Controller compromise → spec injection | `MonitoringSpec.ExtraSinks` references **names**, not configs. Sinks must be pre-registered on agents via install-time config; the controller cannot inject sink configs. |
 | Controller compromise → exfil via spec | Specs go only to agents over the gRPC stream; agents do not push raw events to the controller. The controller cannot turn into an exfil sink without operator install action. |
 | Webhook compromise | `failurePolicy: Fail`; webhook restart is loud (CRDs become un-applyable). |
