@@ -30,10 +30,36 @@ import (
 	"github.com/gke-labs/in-cluster-observability/internal/otlpreceiver"
 )
 
-// metricAttrResult is a small helper for the result attribute used by
-// the ObiReloadsTotal counter and others.
+// Small helpers for the standard counter attribute sets.
 func metricAttrResult(result string) metric.AddOption {
 	return metric.WithAttributes(attribute.String("result", result))
+}
+
+func metricAttrModule(m Module) metric.AddOption {
+	return metric.WithAttributes(attribute.String("module", m.String()))
+}
+
+func metricAttrKind(k EventKind) metric.AddOption {
+	return metric.WithAttributes(attribute.String("kind", eventKindString(k)))
+}
+
+func metricAttrReason(reason string) metric.AddOption {
+	return metric.WithAttributes(attribute.String("reason", reason))
+}
+
+func eventKindString(k EventKind) string {
+	switch k {
+	case EventMetric:
+		return "metric"
+	case EventSpan:
+		return "span"
+	case EventEdge:
+		return "edge"
+	case EventModuleDegraded:
+		return "module_degraded"
+	default:
+		return "unknown"
+	}
 }
 
 // NewBridge constructs the sibling-container Manager: an OTLP receiver
@@ -345,20 +371,38 @@ type bridgeHandler struct {
 	b *bridgeManager
 }
 
-func (h *bridgeHandler) OnMetrics(ctx context.Context, _ *collmetricspb.ExportMetricsServiceRequest) error {
-	h.b.metrics.EventsTotal.Add(ctx, 1)
-	// Real translation lands in #72 (L4) / #73 (HTTP/1.1).
+func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.ExportMetricsServiceRequest) error {
+	for _, ev := range translateMetrics(req.GetResourceMetrics()) {
+		h.emit(ctx, ev)
+	}
 	return nil
 }
 
 func (h *bridgeHandler) OnTraces(ctx context.Context, _ *colltracepb.ExportTraceServiceRequest) error {
-	h.b.metrics.EventsTotal.Add(ctx, 1)
-	// Real translation lands in #73 (HTTP/1.1).
+	// Span translation lands in #73 (HTTP/1.1).
+	h.b.metrics.EventsTotal.Add(ctx, 1, metricAttrModule(ModuleHTTP1), metricAttrKind(EventSpan))
 	return nil
 }
 
 func (h *bridgeHandler) OnLogs(ctx context.Context, _ *colllogspb.ExportLogsServiceRequest) error {
-	h.b.metrics.EventsTotal.Add(ctx, 1)
+	// Logs not used in v0.2; drop silently.
 	return nil
+}
+
+// emit pushes ev onto the Events() channel non-blockingly, ticking the
+// EventsTotal counter on success and EventsDroppedTotal on backpressure.
+// Dropped events do not block the OTLP receiver — the hot path stays cold.
+func (h *bridgeHandler) emit(ctx context.Context, ev Event) {
+	select {
+	case h.b.events <- ev:
+		h.b.metrics.EventsTotal.Add(ctx, 1,
+			metricAttrModule(ev.Module),
+			metricAttrKind(ev.Kind),
+		)
+	default:
+		h.b.metrics.EventsDroppedTotal.Add(ctx, 1,
+			metricAttrReason("backpressure"),
+		)
+	}
 }
 

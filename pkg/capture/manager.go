@@ -225,17 +225,48 @@ type Event struct {
 	Edge   *EdgeEvent
 }
 
-// MetricEvent carries a single tsdb-bound sample. Field set lands with
-// the metric write path in v0.3.
+// MetricEvent carries a single translated metric datapoint from OBI.
+// Per ADR-0017.5, v0.2 carries the minimal field set; richer attributes
+// (e.g. k8s.* resource attrs after enrichment) land in v0.3.
 //
 // Stability: Experimental
-type MetricEvent struct{}
+type MetricEvent struct {
+	// Name is the metric name as emitted by OBI (e.g. tcp.rx.bytes).
+	// The translator does not rename here; renaming to the canonical
+	// ollie_* prefix happens in pkg/schema-driven enrichment in v0.3.
+	Name string
+	// Value is the datapoint's value at the report time (counters
+	// arrive as deltas / sums per OBI's aggregation; this field carries
+	// the raw value reported).
+	Value float64
+	// Attributes is the merged set of resource + datapoint attributes,
+	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	Attributes map[string]string
+}
 
-// SpanEvent carries a single OTel-shaped span. Field set lands with
-// the HTTP/gRPC tracers in v0.2.
+// SpanEvent carries a single translated OTel-shaped span from OBI's
+// L7 capture (HTTP/1.1 in v0.2). Per ADR-0017.5, field set is
+// minimal — full OTel span model (attribute soup + events + links)
+// arrives in v0.3.
 //
 // Stability: Experimental
-type SpanEvent struct{}
+type SpanEvent struct {
+	// Name is the span name as emitted by OBI (typically the OTel
+	// semconv form, e.g. "GET /users/{id}" or "GET").
+	Name string
+	// Method is the HTTP method (GET, POST, ...).
+	Method string
+	// Path is the raw, untemplated URL path. Templating arrives in
+	// v0.6 (#108).
+	Path string
+	// StatusCode is the HTTP response status (0 if unknown).
+	StatusCode int
+	// DurationNs is the span duration in nanoseconds.
+	DurationNs uint64
+	// Attributes is the merged set of resource + span attributes,
+	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	Attributes map[string]string
+}
 
 // EdgeEvent carries a single topology edge record. Field set lands
 // with the topology subsystem in v0.5.
