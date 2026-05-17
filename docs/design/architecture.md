@@ -55,7 +55,7 @@ flowchart LR
 
 **Sinks.** First-class consumers of captured data. Built-in: OTLP gRPC + HTTP push, Prometheus remote-write + scrape endpoint, custom-metrics APIService, gRPC streaming. Third parties register their own via the public [`pkg/sink`](sinks-and-extensibility.md) interfaces. Sinks run **in-process** with whichever component owns the data they want (typically the agent for raw push, the query server for query-result-derived sinks).
 
-**Library surface (`core/pkg/*`).** The public Go API. Third parties import `pkg/capture`, `pkg/store`, `pkg/query`, `pkg/sink`, `pkg/topology`, `pkg/controller` to build their own binaries with custom sink registration. Detail in [`public-api.md`](public-api.md).
+**Library surface (`pkg/*`).** The public Go API. Third parties import `pkg/capture`, `pkg/store`, `pkg/query`, `pkg/sink`, `pkg/topology`, `pkg/controller` to build their own binaries with custom sink registration. Detail in [`public-api.md`](public-api.md).
 
 ## 3. Data flow
 

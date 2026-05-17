@@ -30,10 +30,10 @@ flowchart TB
 | Tier | Runs on | Cadence | Owner |
 |---|---|---|---|
 | Unit | every push (`ap test //...`) | seconds | per-package |
-| Contract | every push (`ap test //...`) | tens of seconds | `core/pkg/capture`, `core/pkg/controller` |
+| Contract | every push (`ap test //...`) | tens of seconds | `pkg/capture`, `pkg/controller` |
 | Integration | every push | low minutes | per-component, lives next to the component |
-| E2E | every PR, nightly | tens of minutes | `core/tests/e2e/` |
-| Benchmark | every PR (smoke), nightly (full) | hour-scale (full) | `core/tests/bench/` |
+| E2E | every PR, nightly | tens of minutes | `tests/e2e/` |
+| Benchmark | every PR (smoke), nightly (full) | hour-scale (full) | `tests/bench/` |
 
 `ap test //...` runs unit + contract + integration. E2E and Benchmark are gated by `RUN_E2E=1` and `RUN_BENCH=1` env vars per the existing convention.
 
@@ -44,7 +44,7 @@ Per-package, hermetic, fast. Conventions:
 - Subtest tables (`t.Run(name, …)`) for variant coverage.
 - `testdata/` for fixtures.
 - `internal/testutil/` for shared helpers but no test logic in `pkg/`.
-- Coverage target: **≥ 80%** for `core/pkg/*`. Tracked in CI; PRs that drop coverage by >2% get auto-commented (advisory, not blocking).
+- Coverage target: **≥ 80%** for `pkg/*`. Tracked in CI; PRs that drop coverage by >2% get auto-commented (advisory, not blocking).
 - All public APIs in `pkg/` get exemplary godoc-runnable examples (`ExampleXxx` funcs).
 
 Unit tests **do not** load eBPF, hit kernels, or open ports. Anything that would is integration or higher.
@@ -53,12 +53,12 @@ Unit tests **do not** load eBPF, hit kernels, or open ports. Anything that would
 
 The OBI adapter contract suite is the most important non-obvious test investment in the project. Full spec in [`obi-integration.md`](obi-integration.md) §4. Summary:
 
-- Location: `core/tests/contract/obi/`
+- Location: `tests/contract/obi/`
 - Drives the `pkg/capture` adapter against pinned input fixtures, diffs `Event` output against goldens.
 - Required to pass without retries on every PR.
 - Augmented on every OBI bump.
 
-A second contract suite covers the controller↔agent gRPC wire shape at `core/tests/contract/controlplane/`:
+A second contract suite covers the controller↔agent gRPC wire shape at `tests/contract/controlplane/`:
 
 - Replay recorded controller messages against a captured agent state and assert idempotent application.
 - Replay recorded agent statuses against a captured controller state and assert correct CR status updates.
@@ -77,7 +77,7 @@ Integration tests verify component-internal invariants and contracts with declar
 
 ## 5. E2E tests
 
-Real Kind cluster, real OBI, real kernels. Reuses the harness pattern from the existing `opentelemetry/tests/e2e/harness.go` (Kind lifecycle, docker build/load, kubectl helpers) — that harness moves to `core/tests/e2e/harness.go` with extensions.
+Real Kind cluster, real OBI, real kernels. Reuses the harness pattern from the existing `opentelemetry/tests/e2e/harness.go` (Kind lifecycle, docker build/load, kubectl helpers) — that harness moves to `tests/e2e/harness.go` with extensions.
 
 ### 5.1 Scenarios
 
@@ -95,12 +95,12 @@ Real Kind cluster, real OBI, real kernels. Reuses the harness pattern from the e
 | TLS capture | TLS-enabled httpbin pod with OpenSSL; verify decrypted L7 attributes (method, path, status) appear |
 | GenAI capture | Pod making OpenAI-compatible API calls; verify GenAI span attributes appear |
 
-Each scenario is a single `*_test.go` file under `core/tests/e2e/scenarios/`.
+Each scenario is a single `*_test.go` file under `tests/e2e/scenarios/`.
 
 ### 5.2 Harness API (extending the existing one)
 
 ```go
-// core/tests/e2e/harness.go — extends the opentelemetry/ harness pattern
+// tests/e2e/harness.go — extends the opentelemetry/ harness pattern
 type Harness struct { /* Kind cluster, kubeClient, etc. */ }
 
 func New(t *testing.T, name string) *Harness
@@ -123,14 +123,14 @@ func (h *Harness) GenerateLoad(spec LoadSpec) // wraps wrk / h2load / ghz
 
 ## 6. Benchmark suite
 
-Lives at `core/tests/bench/`. Two modes:
+Lives at `tests/bench/`. Two modes:
 
 - **Smoke** — runs on every PR. ~5 minutes total. Validates the headline numbers haven't moved dramatically (within 10%).
 - **Full** — runs nightly + on release. ~1 hour. Sweeps cardinality and load, produces flamegraphs, exports results to a perf-results bucket (TBD).
 
 ### 6.1 Canary workloads
 
-Each has a deterministic load profile. Located under `core/tests/bench/workloads/`.
+Each has a deterministic load profile. Located under `tests/bench/workloads/`.
 
 | Workload | Generator | Protocol | Baseline rate | Stress rate | Cardinality |
 |---|---|---|---|---|---|
@@ -143,7 +143,7 @@ Each has a deterministic load profile. Located under `core/tests/bench/workloads
 | `genai-mock` | OpenAI-API-compatible client → mock | HTTP/1.1 | 50 req/s/pod | 500 req/s/pod | 3 models |
 | `kafka-mock` | (roadmap) | Kafka | — | — | — |
 
-Each workload is a pair: a server image (`core/tests/bench/workloads/<name>-server/`) and a client (`<name>-client/`). Both are deployed as small Deployments in Kind.
+Each workload is a pair: a server image (`tests/bench/workloads/<name>-server/`) and a client (`<name>-client/`). Both are deployed as small Deployments in Kind.
 
 ### 6.2 Standard cluster topology
 
@@ -226,8 +226,8 @@ For the trickier surfaces:
 ## 10. Test artifacts and dev ergonomics
 
 - `ap test //...` runs unit + contract + integration across all AP roots.
-- `ap e2e core` runs E2E for the new `core/` AP root.
-- `ap bench core` (new ap subcommand if not present; otherwise a thin `core/tests/bench/run.sh`) runs the smoke benchmarks locally.
+- `ap e2e .` runs E2E for the AP root (repo root).
+- `ap bench core` (new ap subcommand if not present; otherwise a thin `tests/bench/run.sh`) runs the smoke benchmarks locally.
 - All test fixtures live in `testdata/` directories adjacent to the test file.
 - CI uploads benchmark artifacts to `${ARTIFACTS}` per the existing presubmit convention.
 
@@ -240,7 +240,7 @@ Adds to the existing `.github/workflows/ci-presubmits.yaml`:
 | `ap-build` | existing | every push |
 | `ap-lint` | existing | every push |
 | `ap-test` | existing, now includes contract suites | every push |
-| `ap-e2e-core` | new — `dev/ci/presubmits/ap-e2e-core` | every PR |
+| `ap-e2e` | new — `dev/ci/presubmits/ap-e2e` | every PR |
 | `ap-bench-smoke` | new — `dev/ci/presubmits/ap-bench-smoke` | every PR |
 | `ap-bench-full` | new — `dev/ci/presubmits/ap-bench-full` | nightly |
 | `ap-kernel-matrix` | new — `dev/ci/presubmits/ap-kernel-matrix` | nightly |

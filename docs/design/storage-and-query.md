@@ -179,7 +179,7 @@ Per [ADR-0008](decisions.md#adr-0008-query-language): PromQL for metrics, CEL fo
 
 The query engine is `github.com/prometheus/prometheus/promql.Engine`, instantiated against our `store.Querier`. Standard PromQL — no extensions. Functions, operators, aggregations all work.
 
-Public Go surface in `core/pkg/query`:
+Public Go surface in `pkg/query`:
 
 ```go
 // Stability: Stable

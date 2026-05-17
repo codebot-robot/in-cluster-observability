@@ -9,10 +9,10 @@ The default `ollie` controller binary is itself an embedder: it imports the same
 
 ## 1. Module layout
 
-A new AP root at [`core/`](../../core) ([ADR-0013](decisions.md#adr-0013-module-layout--new-core-ap-root)). Go module path: `github.com/gke-labs/in-cluster-observability/core`.
+A single AP root at the repo root ([ADR-0015](decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). Go module path: `github.com/gke-labs/in-cluster-observability`.
 
 ```
-core/
+.
 ├── .ap/
 ├── cmd/
 │   └── ollie/         # default controller binary
@@ -40,7 +40,7 @@ core/
 └── go.mod
 ```
 
-**Why `pkg/` and `internal/`.** Go's `internal/` convention is enforced by the compiler: nothing outside `core/` can import `core/internal/*`. This makes the boundary load-bearing, not aspirational.
+**Why `pkg/` and `internal/`.** Go's `internal/` convention is enforced by the compiler: nothing outside the module can import `internal/*`. This makes the boundary load-bearing, not aspirational.
 
 **Why `pkg/obsapi`.** It's the **one-stop facade** for embedders who don't want to wire seven packages by hand. It composes the rest and exposes a single `App` type. Power users still reach into the sub-packages.
 
@@ -58,11 +58,11 @@ import (
     "os/signal"
     "syscall"
 
-    "github.com/gke-labs/in-cluster-observability/core/pkg/obsapi"
-    "github.com/gke-labs/in-cluster-observability/core/pkg/sink"
+    "github.com/gke-labs/in-cluster-observability/pkg/obsapi"
+    "github.com/gke-labs/in-cluster-observability/pkg/sink"
 
     // built-in sinks the embedder wants
-    otlpsink "github.com/gke-labs/in-cluster-observability/core/pkg/sink/otlp"
+    otlpsink "github.com/gke-labs/in-cluster-observability/pkg/sink/otlp"
 
     // their own sink
     "example.com/my-webhook-sink/webhook"
@@ -107,15 +107,15 @@ That's it. Embedders who need more control instantiate `capture.New`, `store.New
 
 ## 3. Stability tiers
 
-Every exported symbol in `core/pkg/*` has one of three stability tags, declared in a `// Stability:` doc comment immediately above the declaration.
+Every exported symbol in `pkg/*` has one of three stability tags, declared in a `// Stability:` doc comment immediately above the declaration.
 
 | Tier | Promise | Examples |
 |---|---|---|
 | **Stable** | Semver. Breaking changes are MAJOR-version bumps. | `obsapi.App`, `sink.PushSink`, `sink.Lifecycle`, `topology.Identity`, the OBI-adapter `capture.Tracer` interface |
 | **Experimental** | May break in MINOR versions. Must declare a `// Stability: Experimental` comment. Documented in release notes. | New protocol-module APIs while protocol coverage is being expanded |
-| **Internal** | No guarantees. Use only inside `core/`. The Go `internal/` mechanism enforces this for whole packages; for single symbols inside a public package, use `// Stability: Internal` and document. | (rare) helper exposed for tests only |
+| **Internal** | No guarantees. Use only inside this module. The Go `internal/` mechanism enforces this for whole packages; for single symbols inside a public package, use `// Stability: Internal` and document. | (rare) helper exposed for tests only |
 
-A package is "Stable" when **every** exported symbol in it is Stable. `core/pkg/sink` is Stable from day one; `core/pkg/capture` starts Experimental because of OBI v0 churn (see [`obi-integration.md`](obi-integration.md)) and graduates to Stable once OBI reaches v1.0.
+A package is "Stable" when **every** exported symbol in it is Stable. `pkg/sink` is Stable from day one; `pkg/capture` starts Experimental because of OBI v0 churn (see [`obi-integration.md`](obi-integration.md)) and graduates to Stable once OBI reaches v1.0.
 
 The release notes for every MINOR release list every Experimental → Stable graduation and every Experimental breakage.
 
@@ -147,7 +147,7 @@ Roles are not mutually exclusive; an embedder can specify `RoleAgent | RoleQuery
 
 ## 6. Versioning and compatibility
 
-- **Module semver.** `core/` follows [Go module semver](https://go.dev/ref/mod#versions). Until 1.0.0, breaking changes are allowed in MINOR; from 1.0.0, only MAJOR.
+- **Module semver.** This module follows [Go module semver](https://go.dev/ref/mod#versions). Until 1.0.0, breaking changes are allowed in MINOR; from 1.0.0, only MAJOR.
 - **Deprecation policy.** Stable APIs marked deprecated stay for two MAJOR versions (so a v1.x deprecation removes at v3.0).
 - **gRPC services.** The controller↔agent wire protocol uses protobuf with `option (versioning).stable = true` on stable methods. Backward-compatible additions only.
 - **CRD versions.** `v1alpha1` while shaped; `v1beta1` once schema is frozen; `v1` once we ship. Storage version migration handled by the controller per K8s conventions.

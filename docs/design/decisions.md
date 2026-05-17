@@ -19,7 +19,7 @@ ADRs are append-only. If a decision is superseded, add a new ADR that supersedes
 
 **Context.** The project requires transparent eBPF-based capture of L4 and L7 (HTTP/1.1, HTTP/2, gRPC, A2A) and TLS-decrypted L7. Three viable paths: (a) `opentelemetry-ebpf-instrumentation` (formerly Grafana Beyla, donated to OTel), (b) fork Pixie's PEM data plane, (c) build bespoke on `cilium/ebpf`. Requirements §6 fixed the eBPF approach but left the library choice for design.
 
-**Decision.** Use OBI as the data plane (Go package `go.opentelemetry.io/obi/pkg/ebpf`). Wrap it behind a thin adapter in `core/pkg/capture` (see [ADR-0010](#adr-0010-obi-version-pinning-and-adapter)).
+**Decision.** Use OBI as the data plane (Go package `go.opentelemetry.io/obi/pkg/ebpf`). Wrap it behind a thin adapter in `pkg/capture` (see [ADR-0010](#adr-0010-obi-version-pinning-and-adapter)).
 
 **Consequences.**
 - ✅ OTLP-shaped output matches our pluggable-sink model with no translation layer.
@@ -83,7 +83,7 @@ ADRs are append-only. If a decision is superseded, add a new ADR that supersedes
 
 **Context.** Requirements §2.4 made "third parties can wrap us and register their own sinks" a load-bearing requirement, not a nice-to-have.
 
-**Decision.** Ship as both a deployable controller binary and an importable Go library. Public API in `core/pkg/{capture,store,query,sink,topology,controller}`; everything else under `core/internal/`. Embedders import only what they need; the default binary registers all built-in sinks and CRD watchers.
+**Decision.** Ship as both a deployable controller binary and an importable Go library. Public API in `pkg/{capture,store,query,sink,topology,controller}`; everything else under `internal/`. Embedders import only what they need; the default binary registers all built-in sinks and CRD watchers.
 
 **Consequences.**
 - ✅ Third-party integrators get a clean import boundary — `pkg/` is supported; `internal/` is fair game to change.
@@ -192,7 +192,7 @@ The two languages serve disjoint data types; consumers pick the one matching wha
 
 **Context.** OBI is v0.8 and explicitly says minor releases may break API and behavior. We depend on it for the deepest part of the stack. Direct dependency would make every OBI bump a project-wide refactor.
 
-**Decision.** All OBI usage lives behind `core/pkg/capture`, a thin adapter that exposes:
+**Decision.** All OBI usage lives behind `pkg/capture`, a thin adapter that exposes:
 - `type Tracer interface { ... }` — our trimmed surface (start/stop, AllowPID/BlockPID, callbacks for spans/metrics/events, protocol-module enable/disable).
 - A `New(cfg Config) (Tracer, error)` constructor.
 - No OBI types leak through the boundary; all are translated to our `pkg/capture` types or to OTel SDK types we already depend on.
@@ -200,7 +200,7 @@ The two languages serve disjoint data types; consumers pick the one matching wha
 Version policy:
 - Pin exactly one OBI minor at a time in `go.mod`.
 - Bumping OBI happens in a **dedicated PR** that touches `pkg/capture` only.
-- A **contract-test suite** in `core/pkg/capture/contracttest/` replays recorded eBPF events and synthetic traffic against the adapter; bumps must pass the suite unchanged. New OBI features get new contract tests before being exposed.
+- A **contract-test suite** in `pkg/capture/contracttest/` replays recorded eBPF events and synthetic traffic against the adapter; bumps must pass the suite unchanged. New OBI features get new contract tests before being exposed.
 - Fork-vs-upstream criteria for TLS coverage gaps: default to upstream contribution. Fork only if a critical hole sits unmerged for one full OBI release cycle.
 
 **Consequences.**
@@ -217,14 +217,14 @@ Version policy:
 
 **Context.** Sinks need to support push (sink-initiated writes to external systems), pull (external systems scrape us), and streaming (long-lived gRPC subscribers). One unified interface fits poorly; three interfaces are clearer.
 
-**Decision.** Three explicit interfaces in `core/pkg/sink`:
+**Decision.** Three explicit interfaces in `pkg/sink`:
 - `PushSink` — `Write(ctx, batch) error`. Core calls into the sink on each write batch.
 - `PullSink` — `RegisterRoutes(mux)`. Core gives the sink a chance to expose HTTP handlers that pull from the store on demand.
 - `StreamingSink` — `Subscribe(ctx, filter) (<-chan Event, error)`. Long-lived; core feeds events into a channel until the consumer disconnects.
 
 All three embed `Lifecycle { Init(ctx, deps) error; Start(ctx) error; Stop(ctx) error; Name() string }`. A single struct can implement multiple interfaces (e.g. the Prometheus sink implements both `PushSink` for remote-write and `PullSink` for the scrape endpoint).
 
-Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misbehaving sinks return errors that core counts and continues — a sink cannot crash the agent.
+Sinks are registered via `pkg/sink.Register(s Sink)` at process start; misbehaving sinks return errors that core counts and continues — a sink cannot crash the agent.
 
 **Consequences.**
 - ✅ Each pattern has the minimal, idiomatic interface.
@@ -309,7 +309,7 @@ Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misb
 All path references in earlier ADRs and design docs are updated to drop the `core/` prefix. ADR-0013's original text is preserved as the historical decision record; this ADR documents the change.
 
 **Consequences.**
-- ✅ Idiomatic Go layout — packages at `pkg/capture` instead of `core/pkg/capture`.
+- ✅ Idiomatic Go layout — packages at `pkg/capture` instead of `pkg/capture`.
 - ✅ Module path matches the project name with no awkward suffix.
 - ✅ Removes the only reason for `core/`, which was POC coexistence.
 - ⚠️ Earlier design docs and the seed issues (~60) were authored with `core/` paths and were swept to drop the prefix.

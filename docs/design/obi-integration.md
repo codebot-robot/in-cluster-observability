@@ -3,23 +3,23 @@
 **Status:** Draft, 2026-05-17
 **Owners:** TBD
 
-This document specifies how the project consumes OpenTelemetry eBPF Instrumentation (OBI, `go.opentelemetry.io/obi`). OBI is the deepest part of the stack and the only direct dependency that explicitly promises [breaking changes between minor versions](https://opentelemetry.io/blog/2026/obi-goals/). Insulating that churn is what `core/pkg/capture` exists to do.
+This document specifies how the project consumes OpenTelemetry eBPF Instrumentation (OBI, `go.opentelemetry.io/obi`). OBI is the deepest part of the stack and the only direct dependency that explicitly promises [breaking changes between minor versions](https://opentelemetry.io/blog/2026/obi-goals/). Insulating that churn is what `pkg/capture` exists to do.
 
 Background decisions: [ADR-0001](decisions.md#adr-0001-ebpf-data-plane--opentelemetry-ebpf-instrumentation-obi) (we chose OBI), [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter) (we wrap it).
 
 ## 1. Goals and non-goals
 
 **Goals:**
-- One file's worth of code touches OBI APIs directly. Everything else in the project depends on `core/pkg/capture`.
+- One file's worth of code touches OBI APIs directly. Everything else in the project depends on `pkg/capture`.
 - OBI version bumps are a single PR, gated by a contract-test suite.
 - Embedders ([`public-api.md`](public-api.md)) never see OBI types.
-- New protocol modules OBI adds can be exposed in `core/pkg/capture` with minimal change.
+- New protocol modules OBI adds can be exposed in `pkg/capture` with minimal change.
 
 **Non-goals:**
 - We do not aim to "abstract eBPF" generically. The adapter is specifically for OBI's shape; if we ever switch eBPF libraries, the adapter is rewritten, not extended.
 - We do not aim to support multiple OBI versions concurrently. One pinned version at a time per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter).
 
-## 2. The `core/pkg/capture` adapter
+## 2. The `pkg/capture` adapter
 
 A single Go package, ~600–800 LoC, the only place that imports `go.opentelemetry.io/obi/*`.
 
@@ -133,11 +133,11 @@ The adapter is mostly a translation table. Key mappings:
 
 Per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter):
 
-- `core/go.mod` pins **one OBI minor at a time** with an exact version (no `^` or `~`).
+- `go.mod` pins **one OBI minor at a time** with an exact version (no `^` or `~`).
 - OBI bumps live in their own PR. The PR is constrained to touch:
-  - `core/go.mod` / `core/go.sum`
-  - `core/pkg/capture/*.go` (adapter)
-  - `core/tests/contract/obi/*` (contract tests, when they change)
+  - `go.mod` / `go.sum`
+  - `pkg/capture/*.go` (adapter)
+  - `tests/contract/obi/*` (contract tests, when they change)
   - `docs/design/obi-integration.md` (this file, if the surface changes)
   - `docs/design/decisions.md` (if a new ADR is needed)
 - The PR description must include:
@@ -146,11 +146,11 @@ Per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter):
   - Contract-test diff (additions / removals)
 - The contract test suite (§4) must pass without flakiness retries.
 
-If a bump requires breaking changes in `pkg/capture`'s public surface, that's a MINOR-version bump for `core/` until we hit 1.0, MAJOR after. Embedders feel it; the rest of `core/` does not.
+If a bump requires breaking changes in `pkg/capture`'s public surface, that's a MINOR-version bump for this module until we hit 1.0, MAJOR after. Embedders feel it; the rest of the module does not.
 
 ## 4. Contract test suite
 
-Location: `core/tests/contract/obi/`. Purpose: **freeze the adapter's behavior** against recorded inputs so OBI changes can't silently regress us.
+Location: `tests/contract/obi/`. Purpose: **freeze the adapter's behavior** against recorded inputs so OBI changes can't silently regress us.
 
 ### 4.1 What contract tests are
 
@@ -202,7 +202,7 @@ When OBI lacks something we need:
 
 1. **First, open an upstream issue** in `open-telemetry/opentelemetry-ebpf-instrumentation`.
 2. **Next, attempt to contribute** the protocol module / fix upstream. This is the default.
-3. **Maintain a downstream patch** if upstream needs more than one OBI release cycle to land. The patch lives in `core/pkg/capture/patches/` and is applied to the vendored OBI source at build time; the patch's existence is announced in release notes.
+3. **Maintain a downstream patch** if upstream needs more than one OBI release cycle to land. The patch lives in `pkg/capture/patches/` and is applied to the vendored OBI source at build time; the patch's existence is announced in release notes.
 4. **Fork OBI** only if a critical hole sits unmerged after **two full OBI release cycles** (~two minor releases). A fork is an ADR-worthy decision and requires explicit user sign-off.
 
 We never silently fork. The path is always: issue → PR → patch → fork, with explicit gates between each step.
@@ -210,7 +210,7 @@ We never silently fork. The path is always: issue → PR → patch → fork, wit
 ## 6. Operational concerns
 
 - **Vendoring.** We use Go modules, not vendor/. OBI's checked-in eBPF object files come along via `go mod` like any other Go-embedded asset.
-- **eBPF generation.** OBI ships its own `bpf2go`-generated bindings. We do **not** regenerate them in our build. If we add our own `.bpf.c` (rare), it lives in `core/internal/bpf/` and follows the repo's existing `bpf2go` convention (see [`AGENTS.md`](../../AGENTS.md)).
+- **eBPF generation.** OBI ships its own `bpf2go`-generated bindings. We do **not** regenerate them in our build. If we add our own `.bpf.c` (rare), it lives in `internal/bpf/` and follows the repo's existing `bpf2go` convention (see [`AGENTS.md`](../../AGENTS.md)).
 - **CO-RE / BTF.** Both required. The adapter fails fast at startup if BTF is unavailable (per [ADR-0006](decisions.md#adr-0006-kerneldistro-target--cos-125-kernel-6x-btfco-re-required) we don't support non-BTF kernels).
 - **Architecture support.** amd64 and arm64. We CI both per [`testing-and-benchmarks.md`](testing-and-benchmarks.md).
 - **Permissions.** OBI requires `CAP_BPF` + `CAP_PERFMON`. Some uprobe attach paths historically needed `CAP_SYS_ADMIN`; we audit and document any actual need in [`operations.md`](operations.md).

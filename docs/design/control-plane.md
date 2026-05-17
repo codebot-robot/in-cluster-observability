@@ -190,7 +190,7 @@ The reconciler is **not** a full sweep on every event — it's targeted. A `Traf
 The on-the-wire and in-memory form of "what to do for this pod":
 
 ```go
-// in core/pkg/controller — Stability: Stable (the wire form is gRPC, stable too)
+// in pkg/controller — Stability: Stable (the wire form is gRPC, stable too)
 type MonitoringSpec struct {
     PodUID       types.UID
     PodName      string
@@ -246,7 +246,7 @@ One bidirectional stream per agent. Each agent connects on startup; the controll
 
 ### 4.1 Service definition
 
-Proto under `core/proto/controlplane/v1/`:
+Proto under `proto/controlplane/v1/`:
 
 ```proto
 syntax = "proto3";
@@ -377,7 +377,7 @@ Failover impact: agents see one disconnect, reconnect to the new leader, get a r
 
 ## 7. RBAC
 
-Manifests sketch (full YAML in `core/k8s/rbac/`):
+Manifests sketch (full YAML in `k8s/rbac/`):
 
 ```yaml
 # ServiceAccount per component.

@@ -28,7 +28,7 @@ The control path (`Controller stream → Spec Manager → OBI`) is asynchronous 
 
 ## 2. Subsystems
 
-### 2.1 Capture (`core/pkg/capture`)
+### 2.1 Capture (`pkg/capture`)
 
 The OBI adapter. Details in [`obi-integration.md`](obi-integration.md). The agent uses it via:
 
@@ -48,7 +48,7 @@ go func() {
 }()
 ```
 
-### 2.2 Spec Manager (`core/internal/specmgr`)
+### 2.2 Spec Manager (`internal/specmgr`)
 
 Receives `MonitoringSpecDelta` messages from the controller stream ([`control-plane.md`](control-plane.md) §4) and translates them into capture and enricher state.
 
@@ -61,7 +61,7 @@ Responsibilities:
 
 Idempotent. Re-application of the same spec is a no-op (Generation-gated).
 
-### 2.3 Enricher (`core/internal/enricher`)
+### 2.3 Enricher (`internal/enricher`)
 
 Per-event enrichment. Single function on the hot path:
 
@@ -117,7 +117,7 @@ func (e *Enricher) Process(ev capture.Event) {
 
 The whole function is allocation-bounded (one `Event` per call, attributes are a small map with capacity hints). Profiling targets per call: ≤500 ns at 10k events/s/agent steady state.
 
-### 2.4 Writer (`core/internal/writer`)
+### 2.4 Writer (`internal/writer`)
 
 Batches events by destination and dispatches to the store and push sinks. Architecturally simple:
 
@@ -147,7 +147,7 @@ func (w *Writer) Submit(ev capture.Event) {
 
 Sink dispatch happens in dedicated goroutines per sink so a slow sink doesn't gate others.
 
-### 2.5 Topology client (`core/pkg/topology`)
+### 2.5 Topology client (`pkg/topology`)
 
 Maintains two caches:
 - **Local PID cache.** Built from Kubelet `/pods` + `/proc/<pid>/cgroup`. Watched for K8s pod-update events (via the controller stream's identity broadcast, scoped to this node).
@@ -224,7 +224,7 @@ These three are visible to HPA and dashboards without any client work.
 
 ## 5. Resource budgets
 
-Per requirement-derived targets. Each is enforced by `core/tests/bench/` (see [`testing-and-benchmarks.md`](testing-and-benchmarks.md)).
+Per requirement-derived targets. Each is enforced by `tests/bench/` (see [`testing-and-benchmarks.md`](testing-and-benchmarks.md)).
 
 | Budget | Steady-state target | Stress ceiling | Verification |
 |---|---|---|---|
@@ -306,7 +306,7 @@ sinks:
 
 ## 9. Deployment manifest summary
 
-(Full YAML lives in `core/k8s/`.)
+(Full YAML lives in `k8s/`.)
 
 ```yaml
 apiVersion: apps/v1
@@ -355,8 +355,8 @@ spec:
 
 Per repo convention ([AGENTS.md](../../AGENTS.md)):
 
-- Any `.bpf.c` we add lives in `core/internal/bpf/` and is generated via `bpf2go` with the existing `cilium/ebpf` toolchain. We expect to add **very little** — OBI ships its own.
-- gRPC stubs for the controller↔agent stream live in `core/pkg/controller/pb/`, generated from `core/proto/controlplane/v1/*.proto` via `ap generate`.
+- Any `.bpf.c` we add lives in `internal/bpf/` and is generated via `bpf2go` with the existing `cilium/ebpf` toolchain. We expect to add **very little** — OBI ships its own.
+- gRPC stubs for the controller↔agent stream live in `pkg/controller/pb/`, generated from `proto/controlplane/v1/*.proto` via `ap generate`.
 
 All generated files are checked in and verified by `ap-verify-generate`.
 

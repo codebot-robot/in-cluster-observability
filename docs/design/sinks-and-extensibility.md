@@ -5,7 +5,7 @@
 
 This document specifies how data leaves the system. It implements [ADR-0011](decisions.md#adr-0011-sink-interface-shape) and satisfies requirement §2.4 (pluggable sinks; library + controller posture).
 
-A "sink" is anything that consumes captured records — an OTLP collector, a Prometheus server, the Kubernetes HPA via `custom.metrics.k8s.io`, an AI agent's streaming subscriber, or a third-party Go binary that imports `core/pkg/sink` and registers its own. All are first-class.
+A "sink" is anything that consumes captured records — an OTLP collector, a Prometheus server, the Kubernetes HPA via `custom.metrics.k8s.io`, an AI agent's streaming subscriber, or a third-party Go binary that imports `pkg/sink` and registers its own. All are first-class.
 
 ## 1. Three interfaces, one lifecycle
 
@@ -155,11 +155,11 @@ The agent's hot path **never blocks on a sink**. Push delivery uses a bounded pe
 
 ## 5. Built-in sinks
 
-All built-ins live under `core/pkg/sink/<name>/`. Each is independently importable; the default binary registers the full set.
+All built-ins live under `pkg/sink/<name>/`. Each is independently importable; the default binary registers the full set.
 
 ### 5.1 OTLP push
 
-Package: `core/pkg/sink/otlp`. Implements `PushSink`.
+Package: `pkg/sink/otlp`. Implements `PushSink`.
 
 ```go
 type Config struct {
@@ -177,11 +177,11 @@ Translates `Batch.Metrics` to OTLP `ExportMetricsServiceRequest`, `Batch.Spans` 
 
 ### 5.2 OTLP HTTP push
 
-Package: `core/pkg/sink/otlphttp`. Same as above but over OTLP/HTTP.
+Package: `pkg/sink/otlphttp`. Same as above but over OTLP/HTTP.
 
 ### 5.3 Prometheus remote-write
 
-Package: `core/pkg/sink/promremote`. Implements `PushSink` (metrics only — `Spans` and `Edges` ignored).
+Package: `pkg/sink/promremote`. Implements `PushSink` (metrics only — `Spans` and `Edges` ignored).
 
 ```go
 type Config struct {
@@ -197,19 +197,19 @@ Wraps `github.com/prometheus/prometheus/storage/remote`. Honors `Retry-After`. S
 
 ### 5.4 Prometheus scrape endpoint
 
-Package: `core/pkg/sink/promscrape`. Implements `PullSink`.
+Package: `pkg/sink/promscrape`. Implements `PullSink`.
 
 `RegisterRoutes(mux)` mounts `/metrics` returning the standard Prometheus text exposition format, served directly from the tsdb HEAD via the storage's existing `/api/v1/query` plumbing repurposed. Scrape interval is set by whoever scrapes us; we don't poll.
 
 ### 5.5 Custom Metrics API (HPA)
 
-Package: `core/pkg/sink/custommetrics`. Implements `PullSink`.
+Package: `pkg/sink/custommetrics`. Implements `PullSink`.
 
 `RegisterRoutes(mux)` mounts the `/apis/custom.metrics.k8s.io/v1beta1/...` paths and serves the K8s custom-metrics API. Translates incoming paths to PromQL templates per [`storage-and-query.md`](storage-and-query.md#7-server-side-aggregation-for-hpa), executes against `Deps.Query`, returns `MetricValueList` JSON. Requires the `APIService` install in [`operations.md`](operations.md).
 
 ### 5.6 gRPC streaming
 
-Package: `core/pkg/sink/grpcstream`. Implements `StreamingSink`.
+Package: `pkg/sink/grpcstream`. Implements `StreamingSink`.
 
 Exposes a gRPC service with:
 - `StreamSpans(filter cel) → stream Span` — long-lived, fanned out across nodes
@@ -218,7 +218,7 @@ Exposes a gRPC service with:
 
 `Subscribe(ctx, filter)` is called by the gRPC handler; the channel returned by the sink is forwarded to the client.
 
-The CLI (`otelctl`-equivalent in `core/cmd/iobsctl`) speaks this gRPC service.
+The CLI (`otelctl`-equivalent in `cmd/iobsctl`) speaks this gRPC service.
 
 ### 5.7 Built-in registration
 
@@ -241,14 +241,14 @@ Built-ins that an embedder doesn't want are disabled via config or by constructi
 
 ## 6. Library vs controller mode
 
-There is one binary: `core/cmd/ollie`. The mode is set by:
+There is one binary: `cmd/ollie`. The mode is set by:
 - The `--role` flag (`agent | controller | query | all`), or
 - `INCLUSTER_OBS_ROLE` env var, or
 - `obsapi.Config.Role` when used as a library.
 
 When used as a library, an embedder writes their own `main.go` and calls `obsapi.New(...).Run(ctx)`. All behavior is driven by which `Role` is selected and which sinks are registered.
 
-There is **no separate "library build" vs "binary build."** The default binary is itself a library consumer that lives in this repo (the `core/cmd/ollie` package).
+There is **no separate "library build" vs "binary build."** The default binary is itself a library consumer that lives in this repo (the `cmd/ollie` package).
 
 ## 7. A complete third-party sink — worked example
 
@@ -265,7 +265,7 @@ import (
     "net/http"
     "time"
 
-    "github.com/gke-labs/in-cluster-observability/core/pkg/sink"
+    "github.com/gke-labs/in-cluster-observability/pkg/sink"
 )
 
 type Sink struct {
@@ -367,4 +367,4 @@ Per [`public-api.md`](public-api.md) §3:
 1. **Per-record vs per-batch push.** Right now `PushSink.Write` takes a `Batch`. Some sinks want per-record callbacks. We could add a `RecordSink` interface later, but for v1 we believe `Batch` is right (amortizes overhead, sinks can iterate trivially). Revisit if a real use case demands it.
 2. **Sink-side filtering.** Should sinks declare CEL filters they want core to apply before invoking `Write`, saving them the work? Currently sinks filter internally. Filtering at core is an optimization not a correctness fix; defer.
 3. **Backpressure-aware StreamingSink.** Today `Subscribe` returns a channel; if the channel is unbuffered/small, core fills it and drops. A `Subscribe2(ctx, filter, sendFn func(Event) error) error` style might be cleaner. Decision deferred to first streaming-sink consumer at scale.
-4. **Sink discovery for embedders.** Should `core/pkg/sink/builtin` exist as a one-import "all built-ins" convenience? Probably yes once we have 5+ built-ins; punted until then.
+4. **Sink discovery for embedders.** Should `pkg/sink/builtin` exist as a one-import "all built-ins" convenience? Probably yes once we have 5+ built-ins; punted until then.

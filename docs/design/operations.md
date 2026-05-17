@@ -26,7 +26,7 @@ Cert-manager is a hard dependency. The install docs call this out and link the u
 
 ## 2. RBAC
 
-Least-privilege per SA. Full YAML in `core/k8s/rbac/`; below is the privilege summary.
+Least-privilege per SA. Full YAML in `k8s/rbac/`; below is the privilege summary.
 
 ### 2.1 Agent
 
@@ -251,7 +251,7 @@ Every component exposes:
 - **`SIGUSR1`** — reload config from disk (where applicable).
 - **`SIGUSR2`** — dump goroutine stack to stderr (useful in liveness-probe-failure investigations).
 
-A `iobsctl` CLI under `core/cmd/iobsctl/` wraps common operator queries — list active monitors, query metric, stream spans with a filter, dump identity cache.
+A `iobsctl` CLI under `cmd/iobsctl/` wraps common operator queries — list active monitors, query metric, stream spans with a filter, dump identity cache.
 
 ## 8. Resource defaults
 
