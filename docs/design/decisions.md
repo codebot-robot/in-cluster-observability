@@ -257,7 +257,7 @@ Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misb
 
 ## ADR-0013: Module layout = new `core/` AP root
 
-**Status:** Accepted, 2026-05-17
+**Status:** Accepted, 2026-05-17 — migration clause amended by [ADR-0014](#adr-0014-poc-removed-early-amends-adr-0013-migration-clause); layout clause superseded by [ADR-0015](#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)
 
 **Context.** Repo already has three AP roots (`/`, `opentelemetry/`, `obs/`) per [`AGENTS.md`](../../AGENTS.md). The fresh codebase needs a home. Adding to an existing root mixes new design with disposable POC.
 
@@ -289,6 +289,35 @@ Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misb
 **Supersedes.** ADR-0013's migration clause only (*"The existing POC roots (`/`, `opentelemetry/`, `obs/`) stay until the new code reaches parity, then get removed in a single cleanup PR"*). The structural decisions in ADR-0013 are otherwise unchanged.
 
 **Implemented in.** Commit `e5235a9` on the `rewrite` branch.
+
+---
+
+## ADR-0015: Collapse `core/` to repo root (supersedes ADR-0013 layout)
+
+**Status:** Accepted, 2026-05-17 (supersedes the layout clause of [ADR-0013](#adr-0013-module-layout--new-core-ap-root))
+
+**Context.** [ADR-0013](#adr-0013-module-layout--new-core-ap-root) placed the new code under a `core/` AP root subdirectory. The rationale was to isolate the rewrite from the three POC AP roots that would coexist temporarily. With the POC removed early ([ADR-0014](#adr-0014-poc-removed-early-amends-adr-0013-migration-clause)) and only one AP root planned going forward, the original rationale no longer applies.
+
+**Decision.** Put the new code at the **repo root**, not under `core/`:
+
+- Single Go module `github.com/gke-labs/in-cluster-observability` (no `/core` suffix).
+- Single AP root at the repo root: `/.ap/`.
+- Public packages under `pkg/{capture,store,query,sink,topology,controller,schema,obsapi}`; private under `internal/`.
+- Default binary at `cmd/ollie/`.
+- Manifests at `k8s/`, images at `images/`, tests at `tests/`, protos at `proto/`, dashboards at `dashboards/`, Helm chart at `helm/`.
+
+All path references in earlier ADRs and design docs are updated to drop the `core/` prefix. ADR-0013's original text is preserved as the historical decision record; this ADR documents the change.
+
+**Consequences.**
+- ✅ Idiomatic Go layout — packages at `pkg/capture` instead of `core/pkg/capture`.
+- ✅ Module path matches the project name with no awkward suffix.
+- ✅ Removes the only reason for `core/`, which was POC coexistence.
+- ⚠️ Earlier design docs and the seed issues (~60) were authored with `core/` paths and were swept to drop the prefix.
+- ⚠️ Loses optionality for future additional AP roots (e.g. a separate CLI repo or experimental subproject). Acceptable — if that becomes needed, we add a new AP root then.
+
+**Supersedes.** ADR-0013's layout clause (`core/` subdirectory). ADR-0013's choices of `pkg/` vs `internal/`, public-API stability, and default-binary structure all stand.
+
+**Implemented in.** Sed sweep across design docs, AGENTS.md, and seed issue bodies on 2026-05-17.
 
 ---
 
