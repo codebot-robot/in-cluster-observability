@@ -378,9 +378,10 @@ func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.Export
 	return nil
 }
 
-func (h *bridgeHandler) OnTraces(ctx context.Context, _ *colltracepb.ExportTraceServiceRequest) error {
-	// Span translation lands in #73 (HTTP/1.1).
-	h.b.metrics.EventsTotal.Add(ctx, 1, metricAttrModule(ModuleHTTP1), metricAttrKind(EventSpan))
+func (h *bridgeHandler) OnTraces(ctx context.Context, req *colltracepb.ExportTraceServiceRequest) error {
+	for _, ev := range translateTraces(req.GetResourceSpans()) {
+		h.emit(ctx, ev)
+	}
 	return nil
 }
 
