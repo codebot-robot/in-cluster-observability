@@ -30,6 +30,8 @@ package capture
 import (
 	"context"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Manager is the agent's handle on the eBPF capture pipeline. One
@@ -60,7 +62,7 @@ type Manager interface {
 
 	AddEnricher(Enricher)
 
-	Metrics() Metrics
+	Metrics() *Metrics
 }
 
 // Config governs construction. Fields are additive; embedders rely
@@ -216,8 +218,39 @@ type EdgeEvent struct{}
 // Stability: Experimental
 type Enricher func(ctx context.Context, ev *Event)
 
-// Metrics is the self-observability handle exposed by Manager. Concrete
-// counter types fill in alongside the metric impl in v0.2 (#76).
+// Metrics is the self-observability handle exposed by Manager. Counter
+// names use the canonical ollie_capture_* prefix per
+// docs/design/operations.md §5. Construct via NewMetrics; see metrics.go.
 //
 // Stability: Experimental
-type Metrics interface{}
+type Metrics struct {
+	// Meter is the OTel meter scoped to the capture subsystem.
+	// Embedders may create additional instruments off this if needed,
+	// but should prefer the named fields below for the standard set.
+	Meter metric.Meter
+
+	// EventsTotal counts every translated capture.Event emitted to the
+	// Events() channel. Attributes: module, kind.
+	EventsTotal metric.Int64Counter
+
+	// EventsDroppedTotal counts events that were not delivered.
+	// Attributes: reason (backpressure | translation_error | shutdown).
+	EventsDroppedTotal metric.Int64Counter
+
+	// ActivePIDs is the current count of PIDs in the AllowPID set.
+	// Up/down counter — adjusted on AllowPID / BlockPID.
+	ActivePIDs metric.Int64UpDownCounter
+
+	// ObiReloadsTotal counts OBI config-reload signals issued by the
+	// agent. Attributes: result (success | failure).
+	ObiReloadsTotal metric.Int64Counter
+
+	// ObiRestartsTotal counts observed restarts of the sibling OBI
+	// container, sourced from a container-status watcher (lands with
+	// #77). Zero in v0.2 until that watcher ships.
+	ObiRestartsTotal metric.Int64Counter
+
+	// PanicsTotal counts recovered panics on the agent side.
+	// Attributes: component (receiver | translator | writer | enricher).
+	PanicsTotal metric.Int64Counter
+}

@@ -16,24 +16,34 @@ package capture
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
-// New returns a v0.1 no-op Manager. Real OBI wiring lands in v0.2.
+// New returns a v0.1 no-op Manager with a working self-observability
+// handle. Real OBI wiring (OTLP receiver + config writer) lands in v0.2
+// via newObiBridgeManager; this constructor will switch over once that
+// implementation is plumbed.
 //
 // Stability: Experimental
 func New(cfg Config) (Manager, error) {
+	m, err := NewMetrics(DefaultMeterProvider())
+	if err != nil {
+		return nil, fmt.Errorf("capture: metrics init: %w", err)
+	}
 	return &noopManager{
 		cfg:     cfg,
 		events:  make(chan Event),
 		modules: map[Module]struct{}{},
 		pids:    map[uint32]PIDSpec{},
+		metrics: m,
 	}, nil
 }
 
 // noopManager is the v0.1 placeholder: lifecycle is real, but no
 // kernel work happens. Events() is closed on Stop without ever
-// emitting an event.
+// emitting an event. v0.2 will replace this with the real OBI-bridge
+// manager (OTLP receiver + config writer) per ADR-0018.
 type noopManager struct {
 	cfg Config
 
@@ -43,6 +53,7 @@ type noopManager struct {
 	modules   map[Module]struct{}
 	pids      map[uint32]PIDSpec
 	enrichers []Enricher
+	metrics   *Metrics
 
 	events chan Event
 }
@@ -114,4 +125,4 @@ func (m *noopManager) AddEnricher(e Enricher) {
 	m.enrichers = append(m.enrichers, e)
 }
 
-func (m *noopManager) Metrics() Metrics { return nil }
+func (m *noopManager) Metrics() *Metrics { return m.metrics }
