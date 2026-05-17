@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	colllogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	colltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -27,6 +29,12 @@ import (
 	"github.com/gke-labs/in-cluster-observability/internal/obiconfig"
 	"github.com/gke-labs/in-cluster-observability/internal/otlpreceiver"
 )
+
+// metricAttrResult is a small helper for the result attribute used by
+// the ObiReloadsTotal counter and others.
+func metricAttrResult(result string) metric.AddOption {
+	return metric.WithAttributes(attribute.String("result", result))
+}
 
 // NewBridge constructs the sibling-container Manager: an OTLP receiver
 // on loopback + an OBI config writer. The sibling OBI container is
@@ -44,11 +52,15 @@ func NewBridge(cfg Config) (Manager, error) {
 	}
 
 	b := &bridgeManager{
-		cfg:     cfg,
-		events:  make(chan Event, cfg.EventBuffer),
-		modules: map[Module]struct{}{},
-		pids:    map[uint32]PIDSpec{},
-		metrics: m,
+		cfg:            cfg,
+		events:         make(chan Event, cfg.EventBuffer),
+		modules:        map[Module]struct{}{},
+		pids:           map[uint32]PIDSpec{},
+		metrics:        m,
+		dirty:          make(chan struct{}, 1),
+		stopCh:         make(chan struct{}),
+		coalDone:       make(chan struct{}),
+		debounceWindow: 500 * time.Millisecond,
 	}
 
 	if cfg.ObiConfigPath != "" {
@@ -79,6 +91,16 @@ type bridgeManager struct {
 	writer   *obiconfig.Writer
 	receiver *otlpreceiver.Server
 	events   chan Event
+
+	// reload coalescer infrastructure (per obi-integration.md §5):
+	// non-blocking triggerReload posts to dirty; coalescerLoop consumes
+	// dirty events with a debounce window before writing the OBI config.
+	dirty    chan struct{}
+	stopCh   chan struct{}
+	coalDone chan struct{}
+
+	// debounceWindow is configurable for tests; defaults to 500ms.
+	debounceWindow time.Duration
 }
 
 // Start binds the OTLP receivers (if addresses are configured) and
@@ -116,9 +138,16 @@ func (b *bridgeManager) Start(ctx context.Context) error {
 	// Initial OBI config — empty discovery list; modules are off until
 	// EnableModule is called.
 	if b.writer != nil {
-		if _, err := b.writer.Write(obiconfig.DefaultFile(b.cfg.OBIEndpoint)); err != nil {
+		if _, err := b.writer.Write(b.buildConfig()); err != nil {
 			return fmt.Errorf("capture: initial obi config: %w", err)
 		}
+	}
+
+	// Reload coalescer — only run if a writer is configured.
+	if b.writer != nil {
+		go b.coalescerLoop()
+	} else {
+		close(b.coalDone)
 	}
 	return nil
 }
@@ -132,8 +161,13 @@ func (b *bridgeManager) Stop(ctx context.Context) error {
 	}
 	b.stopped = true
 	recv := b.receiver
+	started := b.started
 	b.mu.Unlock()
 
+	close(b.stopCh)
+	if started && b.writer != nil {
+		<-b.coalDone
+	}
 	if recv != nil {
 		_ = recv.Stop(ctx)
 	}
@@ -141,44 +175,51 @@ func (b *bridgeManager) Stop(ctx context.Context) error {
 	return nil
 }
 
-// AllowPID is wired in #71. v0.2 stub: records the spec in memory.
-// Config-writer integration lands in the AllowPID/BlockPID commit.
+// AllowPID adds (or updates) a per-PID monitoring spec. The discovery
+// section of OBI's config is derived from the current pid set; a
+// reload signal is sent (debounced by the coalescer).
 func (b *bridgeManager) AllowPID(pid uint32, spec PIDSpec) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if _, existed := b.pids[pid]; !existed {
 		b.metrics.ActivePIDs.Add(context.Background(), 1)
 	}
 	b.pids[pid] = spec
+	b.mu.Unlock()
+	b.triggerReload()
 	return nil
 }
 
-// BlockPID is wired in #71. v0.2 stub: removes the spec from memory.
+// BlockPID removes a per-PID spec. Idempotent.
 func (b *bridgeManager) BlockPID(pid uint32) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if _, existed := b.pids[pid]; existed {
 		b.metrics.ActivePIDs.Add(context.Background(), -1)
+		delete(b.pids, pid)
+		b.mu.Unlock()
+		b.triggerReload()
+		return nil
 	}
-	delete(b.pids, pid)
+	b.mu.Unlock()
 	return nil
 }
 
-// EnableModule adds the module to the active set and (if a writer is
-// configured) rewrites the OBI config file. Idempotent.
+// EnableModule adds the module to the active set and triggers a reload.
+// Idempotent.
 func (b *bridgeManager) EnableModule(m Module, _ ModuleConfig) error {
 	b.mu.Lock()
 	b.modules[m] = struct{}{}
 	b.mu.Unlock()
-	return b.reload()
+	b.triggerReload()
+	return nil
 }
 
-// DisableModule removes the module and rewrites the OBI config.
+// DisableModule removes the module and triggers a reload.
 func (b *bridgeManager) DisableModule(m Module) error {
 	b.mu.Lock()
 	delete(b.modules, m)
 	b.mu.Unlock()
-	return b.reload()
+	b.triggerReload()
+	return nil
 }
 
 // EnabledModules returns the current module set.
@@ -205,30 +246,97 @@ func (b *bridgeManager) AddEnricher(e Enricher) {
 // Metrics returns the self-observability handle.
 func (b *bridgeManager) Metrics() *Metrics { return b.metrics }
 
-// reload rewrites the OBI config from the current module/pid state.
-// No-op when no writer is configured (tests / dev mode). Result is
-// reported via the ObiReloadsTotal counter.
-func (b *bridgeManager) reload() error {
-	if b.writer == nil {
-		return nil
+// triggerReload posts a non-blocking dirty signal to the coalescer.
+// If the coalescer is already pending, the signal is dropped (it's
+// already going to reload).
+func (b *bridgeManager) triggerReload() {
+	select {
+	case b.dirty <- struct{}{}:
+	default:
 	}
-	b.mu.Lock()
-	file := obiconfig.DefaultFile(b.cfg.OBIEndpoint)
-	// Per #71 (AllowPID), discovery.services will be derived from pids.
-	// For #70, the discovery list stays empty — module enables alone
-	// don't pin specific targets.
-	b.mu.Unlock()
-
-	changed, err := b.writer.Write(file)
-	if err != nil {
-		b.metrics.ObiReloadsTotal.Add(context.Background(), 1)
-		return fmt.Errorf("capture: reload write: %w", err)
-	}
-	if changed {
-		b.metrics.ObiReloadsTotal.Add(context.Background(), 1)
-	}
-	return nil
 }
+
+// coalescerLoop debounces rapid AllowPID/BlockPID/EnableModule calls
+// over debounceWindow before writing the OBI config, so a workload
+// rollout doesn't thrash OBI's reload. Per obi-integration.md §5.
+func (b *bridgeManager) coalescerLoop() {
+	defer close(b.coalDone)
+	for {
+		select {
+		case <-b.stopCh:
+			return
+		case <-b.dirty:
+			// Wait for a quiet period.
+			timer := time.NewTimer(b.debounceWindow)
+		debounce:
+			for {
+				select {
+				case <-b.stopCh:
+					timer.Stop()
+					return
+				case <-b.dirty:
+					// More activity — reset the timer.
+					if !timer.Stop() {
+						<-timer.C
+					}
+					timer.Reset(b.debounceWindow)
+				case <-timer.C:
+					break debounce
+				}
+			}
+			b.writeReload()
+		}
+	}
+}
+
+// writeReload computes the desired OBI config from the current
+// module/pid state and writes it atomically. Result is reported via
+// ObiReloadsTotal{result=success|failure|noop}.
+func (b *bridgeManager) writeReload() {
+	file := b.buildConfig()
+	changed, err := b.writer.Write(file)
+	ctx := context.Background()
+	switch {
+	case err != nil:
+		b.metrics.ObiReloadsTotal.Add(ctx, 1, metricAttrResult("failure"))
+	case !changed:
+		// No-op: identical content, no actual reload happens. Don't
+		// tick the counter — operators expect this counter to reflect
+		// actual OBI reloads.
+	default:
+		b.metrics.ObiReloadsTotal.Add(ctx, 1, metricAttrResult("success"))
+	}
+}
+
+// buildConfig derives an OBI config from the current bridgeManager
+// state. For each tracked PID a Service entry is emitted; OBI's
+// discovery selector resolves it to the matching process. v0.2's
+// schema is a starting point — the exact selector fields will be
+// refined once verified against a real OBI image (#74 contract tests).
+func (b *bridgeManager) buildConfig() obiconfig.File {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	file := obiconfig.DefaultFile(b.cfg.OBIEndpoint)
+	if len(b.pids) == 0 {
+		return file
+	}
+	services := make([]obiconfig.Service, 0, len(b.pids))
+	for pid, spec := range b.pids {
+		services = append(services, obiconfig.Service{
+			Name:      fmt.Sprintf("pid-%d", pid),
+			OpenPorts: portsFromSpec(spec),
+			PIDs:      []uint32{pid},
+		})
+	}
+	file.Discovery.Services = services
+	return file
+}
+
+// portsFromSpec extracts open_ports from a PIDSpec. v0.2 has no port
+// information in the spec yet — controllers will populate this in
+// v0.4. Returns nil for now.
+func portsFromSpec(_ PIDSpec) []uint16 { return nil }
 
 // bridgeHandler implements otlpreceiver.Handler. v0.2 forwards each
 // payload to the translator (#72, #73). For #70 the handler just
@@ -254,5 +362,3 @@ func (h *bridgeHandler) OnLogs(ctx context.Context, _ *colllogspb.ExportLogsServ
 	return nil
 }
 
-// Compile-time bookkeeping for the time import; some helpers use it.
-var _ = time.Second
