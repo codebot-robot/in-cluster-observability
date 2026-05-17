@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,6 +139,56 @@ func TestAllowPID_RejectsBadInput(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusBadRequest {
 		t.Errorf("missing pid: status = %d; want 400", resp2.StatusCode)
+	}
+}
+
+func TestExtraHandler_PromMetricsScrape(t *testing.T) {
+	mp, h, err := capture.NewPromMeterProvider()
+	if err != nil {
+		t.Fatalf("NewPromMeterProvider: %v", err)
+	}
+	mgr, err := capture.NewBridge(capture.Config{MeterProvider: mp})
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
+
+	srv, err := debugendpoint.New(mgr, "127.0.0.1:0",
+		debugendpoint.WithExtraHandler("GET /debug/metrics", h))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	// Tick the counter so it actually shows up in the scrape — OTel
+	// SDK omits never-recorded instruments by default.
+	mgr.Metrics().EventsTotal.Add(context.Background(), 1)
+
+	resp, err := http.Get("http://" + addr + "/debug/metrics")
+	if err != nil {
+		t.Fatalf("GET /debug/metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	out := string(body)
+	// Prometheus text exposition surface — must include at least one of
+	// our self-obs metrics. The exact name depends on the OTel→Prometheus
+	// translation ("." → "_"); accept either prefix.
+	if !strings.Contains(out, "ollie_capture_") {
+		t.Fatalf("/debug/metrics did not include ollie_capture_*; body:\n%s", out)
 	}
 }
 

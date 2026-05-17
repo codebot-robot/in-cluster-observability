@@ -28,6 +28,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -66,11 +67,27 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	mgr, err := capture.NewBridge(capture.Config{
+	// Self-observability: when --debug-endpoint is set, route the
+	// agent's metrics through a Prometheus exporter so they're scrapable
+	// at /debug/metrics on the debug endpoint. The full Prometheus
+	// scrape sink (v0.3 #82) will supersede this with its own listener.
+	var metricsHandler http.Handler
+	captureCfg := capture.Config{
 		OTLPGRPCAddr:  *otlpGRPC,
 		OTLPHTTPAddr:  *otlpHTTP,
 		ObiConfigPath: *obiConfig,
-	})
+	}
+	if *debugEnable {
+		mp, h, err := capture.NewPromMeterProvider()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "prometheus exporter init failed: %v\n", err)
+			os.Exit(1)
+		}
+		captureCfg.MeterProvider = mp
+		metricsHandler = h
+	}
+
+	mgr, err := capture.NewBridge(captureCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "capture init failed: %v\n", err)
 		os.Exit(1)
@@ -87,7 +104,11 @@ func main() {
 	fmt.Fprintf(os.Stderr, "OTLP receiver: gRPC=%s HTTP=%s; OBI config: %s\n", *otlpGRPC, *otlpHTTP, *obiConfig)
 
 	if *debugEnable {
-		dbg, err := debugendpoint.New(mgr, *debugAddr)
+		opts := []debugendpoint.Option{}
+		if metricsHandler != nil {
+			opts = append(opts, debugendpoint.WithExtraHandler("GET /debug/metrics", metricsHandler))
+		}
+		dbg, err := debugendpoint.New(mgr, *debugAddr, opts...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "debug endpoint init failed: %v\n", err)
 			os.Exit(1)
@@ -98,7 +119,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer dbg.Stop(context.Background())
-		fmt.Fprintf(os.Stderr, "debug endpoint enabled on %s (loopback)\n", actualAddr)
+		fmt.Fprintf(os.Stderr, "debug endpoint enabled on %s (loopback); /debug/metrics serves agent self-obs\n", actualAddr)
 	}
 
 	// Drain Events() in a goroutine so the channel never backs up.

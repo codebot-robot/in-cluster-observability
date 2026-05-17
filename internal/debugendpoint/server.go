@@ -44,13 +44,39 @@ type Server struct {
 	addr   string
 	srv    *http.Server
 	listen net.Listener
+
+	// extra is the operator-provided extra-handler set. Mounted under
+	// the registered path on Start. Keyed by path; last writer wins.
+	extra map[string]http.Handler
+}
+
+// Option mutates a Server during construction.
+//
+// Stability: Experimental
+type Option func(*Server)
+
+// WithExtraHandler mounts h at path on the debug mux. Path must begin
+// with /debug/ so it stays in the debug-endpoint namespace. Multiple
+// calls with the same path replace earlier registrations.
+//
+// Typical use: pass the http.Handler returned by
+// capture.NewPromMeterProvider for /debug/metrics — see SMOKE_TEST_v0.2.md.
+//
+// Stability: Experimental
+func WithExtraHandler(path string, h http.Handler) Option {
+	return func(s *Server) {
+		if s.extra == nil {
+			s.extra = make(map[string]http.Handler)
+		}
+		s.extra[path] = h
+	}
 }
 
 // New constructs a debug Server bound to addr. addr must be loopback;
 // non-loopback bind addresses are rejected (per ADR-0017.3).
 //
 // Stability: Experimental
-func New(mgr capture.Manager, addr string) (*Server, error) {
+func New(mgr capture.Manager, addr string, opts ...Option) (*Server, error) {
 	if mgr == nil {
 		return nil, errors.New("debugendpoint: capture.Manager required")
 	}
@@ -60,7 +86,11 @@ func New(mgr capture.Manager, addr string) (*Server, error) {
 	if err := requireLoopback(addr); err != nil {
 		return nil, err
 	}
-	return &Server{mgr: mgr, addr: addr}, nil
+	s := &Server{mgr: mgr, addr: addr}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Start binds and serves in a background goroutine. Returns the
@@ -76,6 +106,9 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux.HandleFunc("POST /debug/allow-pid", s.handleAllowPID)
 	mux.HandleFunc("POST /debug/block-pid", s.handleBlockPID)
 	mux.HandleFunc("GET /debug/state", s.handleState)
+	for path, h := range s.extra {
+		mux.Handle(path, h)
+	}
 
 	s.srv = &http.Server{
 		Handler:           mux,
