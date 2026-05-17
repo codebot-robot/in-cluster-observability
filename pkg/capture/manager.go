@@ -71,18 +71,49 @@ type Manager interface {
 // Stability: Experimental
 type Config struct {
 	// KubeletAddr is the URL the agent uses to query the node-local
-	// Kubelet for the PID-to-Pod cache bootstrap. Defaults to
-	// "https://127.0.0.1:10250" when empty.
+	// Kubelet for the PID-to-Pod cache bootstrap (v0.3 / pkg/topology).
+	// Defaults to "https://127.0.0.1:10250" when empty.
 	KubeletAddr string
 	// ProcPath is the mount point of host /proc inside the agent
 	// container. Defaults to "/proc" when empty.
 	ProcPath string
-	// BpfFSPath is the bpffs mount point used for map pinning.
-	// Defaults to "/sys/fs/bpf" when empty.
+	// BpfFSPath is the bpffs mount point used for map pinning. Unused
+	// in the sibling-container model (OBI owns the bpffs mount); kept
+	// for forward compatibility.
 	BpfFSPath string
 	// EventBuffer sizes the Events() channel. Defaults to 4096 when
 	// zero or negative.
 	EventBuffer int
+
+	// --- Sibling-container fields (per ADR-0018) ---
+
+	// ObiConfigPath is the on-disk YAML file the agent writes for the
+	// sibling OBI container to consume. Empty disables the config
+	// writer (useful for tests). Default in production: shared volume
+	// at /etc/ollie/obi-config/config.yaml.
+	ObiConfigPath string
+	// OTLPGRPCAddr is the loopback bind address for the OTLP gRPC
+	// receiver. Empty disables the gRPC receiver. Must be loopback.
+	OTLPGRPCAddr string
+	// OTLPHTTPAddr is the loopback bind address for the OTLP HTTP
+	// receiver. Empty disables the HTTP receiver. Must be loopback.
+	OTLPHTTPAddr string
+	// OBIEndpoint is the address the agent tells OBI to push OTLP to
+	// (written into ObiConfigPath). Defaults to the value of
+	// OTLPGRPCAddr when empty.
+	OBIEndpoint string
+	// MeterProvider supplies the OTel meter used for self-observability
+	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
+	MeterProvider metric.MeterProvider
+}
+
+func (c *Config) applyDefaults() {
+	if c.EventBuffer <= 0 {
+		c.EventBuffer = 4096
+	}
+	if c.OBIEndpoint == "" {
+		c.OBIEndpoint = c.OTLPGRPCAddr
+	}
 }
 
 // PIDSpec is what the controller's MonitoringSpec resolves to on a
