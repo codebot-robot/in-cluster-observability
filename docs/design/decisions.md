@@ -346,6 +346,61 @@ All path references in earlier ADRs and design docs are updated to drop the `cor
 
 ---
 
+## ADR-0017: v0.2 Capture MVP implementation decisions
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Five implementation-time decisions for v0.2 (Capture MVP, issues [#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) that aren't large enough to merit individual ADRs but should be captured before work begins. Filed as one ADR to keep the log tight; v0.2 implementation PRs reference this ADR for justification per sub-decision.
+
+### 17.1 OBI version pin
+
+**Decision.** v0.2's first OBI integration PR pins **the latest stable OBI v0.x at time of that commit** in `go.mod`. Per [ADR-0010](#adr-0010-obi-version-pinning-and-adapter), one minor at a time; subsequent bumps live in dedicated PRs with the contract-test suite green.
+
+### 17.2 Self-observability metrics library = OpenTelemetry SDK
+
+**Decision.** Use the **OpenTelemetry metrics SDK** (`go.opentelemetry.io/otel/metric` + `go.opentelemetry.io/otel/sdk/metric`) for self-observability across the agent, controller, and query server. The Prometheus scrape sink (v0.3 [#82](https://github.com/gke-labs/in-cluster-observability/issues/82)) wraps the SDK via `go.opentelemetry.io/otel/exporters/prometheus`, exposing `/metrics` in Prometheus text format with no functional loss for operators with existing Prometheus deployments.
+
+**Rationale.**
+- OBI emits OTel-shaped data; consistent metrics vocabulary across data plane and self-observability path. No "two metric SDKs to reason about."
+- Single SDK powers OTLP push, Prometheus scrape, and any future OTel Collector receiver — one source of truth.
+- Industry direction: OTel metrics SDK reached 1.0 stable; OBI / Beyla / Grafana ecosystem is OTel-native; Prometheus itself is converging toward OTLP ingestion. Picking `prometheus/client_golang` today reads as a legacy decision in two years.
+
+**Rejected alternative.** `github.com/prometheus/client_golang` directly. Pros: smaller dep, ~5 lines to instantiate a counter. Cons: forks the project's metrics vocabulary, agent self-obs would be Prometheus-shaped while data-plane outputs are OTel-shaped, and any future OTLP push of self-obs metrics needs a translation shim.
+
+**Consequences.** Three OTel modules become the first non-stdlib deps in `go.mod`. ~20–30 lines of boilerplate per component to instantiate `MeterProvider` / `Reader` / `Exporter`, paid once. Operators see no change at the wire — `/metrics` still serves Prometheus text format.
+
+### 17.3 Debug HTTP endpoint = loopback-only, default off
+
+**Decision.** The agent's debug HTTP endpoint ([#75](https://github.com/gke-labs/in-cluster-observability/issues/75)) binds **`127.0.0.1:9099`** only, behind a **`--debug-endpoint`** flag that **defaults to off**. No authentication required because the listener is loopback-only — access requires `kubectl exec` into the agent pod's network namespace.
+
+**Rationale.** Avoids designing an auth story for a v0.2-only convenience surface. The endpoint exists to drive `AllowPID` / `BlockPID` manually until the controller (v0.4) takes over CRD-driven monitoring.
+
+**Consequences.** Operators who want to drive the debug endpoint from another pod or node must wait for the controller. Acceptable for v0.2 — its audience is developers smoke-testing the capture path, not operators.
+
+### 17.4 Strip OBI's built-in Kubernetes attribution
+
+**Decision.** Disable OBI's native K8s identity attachment for v0.2 Events. All Kubernetes attribution lands via our own `pkg/topology` resolver starting in v0.3 ([#80](https://github.com/gke-labs/in-cluster-observability/issues/80), [#81](https://github.com/gke-labs/in-cluster-observability/issues/81)).
+
+**Rationale.** Two sources of K8s metadata on the same Event creates "which is canonical?" ambiguity and forces our enricher to know what OBI already did to avoid double-decoration. [`docs/design/topology.md`](topology.md) assumes single ownership by `pkg/topology`; honoring that from v0.2 simplifies v0.3.
+
+**Consequences.** v0.2 Events carry no `k8s.*` attributes (only PID + protocol + payload-specific fields per [17.5](#175-v02-metricspan-field-set--minimal-http-focused)). v0.3's enricher populates `k8s.*` from `pkg/topology`. Smoke tests in v0.2 show raw PID-tagged events; K8s-attributed events arrive with v0.3.
+
+**Rejected alternative.** Let OBI attach its K8s attrs and have the enricher overwrite. Works but invites bugs when the two disagree.
+
+### 17.5 v0.2 metric/span field set = minimal HTTP-focused
+
+**Decision.** `MetricEvent` and `SpanEvent` in v0.2 carry only the fields needed to demo HTTP request count + duration via the debug log endpoint: `{path, method, status, duration_ns}` for HTTP; `{bytes_rx, bytes_tx, conns, rtt_ns}` for L4. Full OTel-shaped payloads (attributes maps, full semantic-convention coverage) arrive with v0.3 when there's a store to land in.
+
+**Rationale.** Avoid designing the field set twice. v0.2 has no store and no enricher; sinking events to a debug log only requires the demo fields. v0.3 ([#83](https://github.com/gke-labs/in-cluster-observability/issues/83)) codifies the full schema via `pkg/schema`; the `MetricEvent` / `SpanEvent` types fill in then.
+
+**Consequences.** `pkg/sink.Metric`, `Span`, `Edge` stay empty stubs through v0.2 (already true post-v0.1). Embedders in v0.2 should treat them as "shape only" — no real data flows. Path field is captured raw at this point (templating arrives in v0.6 [#108](https://github.com/gke-labs/in-cluster-observability/issues/108)); v0.2 cardinality is bounded only by the test workload's path set, which is acceptable for the milestone's local-test audience.
+
+---
+
+**Implemented in.** v0.2 milestone work ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)). Each issue's PR references this ADR for the relevant sub-decision.
+
+---
+
 ## Open and superseded ADRs
 
 None yet. New ADRs are appended above this section.
