@@ -8,7 +8,13 @@ This file documents conventions and operational context for working in this repo
 
 This repo is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) was removed early in the rewrite. POC code is preserved on `main` and reachable via `git log main -- <path>`.
 
-All code lives at the **repo root** as a single AP root and single Go module `github.com/gke-labs/in-cluster-observability` (per [ADR-0015](docs/design/decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). The **v0.1 Foundation** milestone ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) has landed: the AP root is bootstrapped, the public package skeletons exist with no-op implementations, the OBI adapter shell is in place, and the container image + DaemonSet manifest deploy as a no-op pod. v0.2 (Capture MVP) wires actual eBPF and the first real protocol modules.
+All code lives at the **repo root** as a single AP root and single Go module `github.com/gke-labs/in-cluster-observability` (per [ADR-0015](docs/design/decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). Per [ADR-0018](docs/design/decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), OBI runs as a **sibling container** in the agent DaemonSet pod, not as an embedded Go library — our agent is an OTLP receiver + OBI config writer.
+
+Milestone status:
+
+- **v0.1 Foundation** ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) landed: AP root, public package skeletons, OBI adapter shell, container image, minimal DaemonSet.
+- **v0.2 Capture MVP** ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) landed: OTLP receivers (gRPC + HTTP loopback), OBI config writer, AllowPID/BlockPID with reload coalescer, L4 TCP + HTTP/1.1 translation, OTel self-obs metrics, panic recovery + ModuleDegraded events, debug HTTP endpoint, contract-test harness. DaemonSet now has two containers (obi sibling + agent).
+- **v0.3 Storage MVP** is next.
 
 What's in the repo:
 
@@ -17,11 +23,12 @@ What's in the repo:
 - `GEMINI.md` — stub pointing here
 - `.ap/` — autoproject config (`ap.yaml`, `headers.yaml`)
 - `go.mod` — single Go module
-- `cmd/ollie/` — default binary (stub in v0.1; prints version and exits unless `--stay-alive`)
-- `pkg/` — public API: `capture`, `obsapi`, `sink`, `topology`, `store`, `query`, `controller`, `schema`
-- `internal/` — private code; `internal/archtest/` enforces the OBI import boundary
+- `cmd/ollie/` — default binary; v0.2 starts OTLP receivers + OBI config writer + optional debug endpoint
+- `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces), `obsapi`, `sink`, `topology`, `store`, `query`, `controller`, `schema`
+- `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `archtest` (enforces OBI import boundary)
 - `images/ollie/` — Dockerfile (distroless static, CGO disabled)
-- `k8s/` — install manifests (namespace + DaemonSet + kustomization)
+- `k8s/` — install manifests (namespace + DaemonSet with `obi` + `agent` containers + kustomization)
+- `tests/contract/obi/` — OBI adapter contract tests + fixture harness
 - `dev/ci/presubmits/` — CI script wrappers
 - `.github/workflows/` — CI YAML
 - `LICENSE`, `README.md`, `.gitignore`
