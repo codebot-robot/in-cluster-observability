@@ -321,6 +321,31 @@ All path references in earlier ADRs and design docs are updated to drop the `cor
 
 ---
 
+## ADR-0016: OBI import boundary enforced via Go test
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** [ADR-0010](#adr-0010-obi-version-pinning-and-adapter) quarantines all OBI usage behind `pkg/capture` so OBI's v0 churn has one-file blast radius. That decision is only useful if the boundary is mechanically enforced — a code-review-only rule will be violated within a release. The design doc says "a linter / build rule fails if any other package imports go.opentelemetry.io/obi/* directly," but leaves the mechanism open.
+
+**Decision.** Enforce the boundary as a **Go test** in `internal/archtest`. The test parses every `.go` file in the module (stdlib `go/parser`, imports-only) and fails if any file outside `pkg/capture/` imports a path under `go.opentelemetry.io/obi`. It runs as part of `go test ./...` and the CI `ap-test` presubmit; no separate tool or build-time hook is needed.
+
+**Consequences.**
+- ✅ No new dependencies (stdlib `go/parser` only).
+- ✅ Fits the existing `go test` / `ap test` developer workflow; no new lint tool to install or wire into editors.
+- ✅ Easy to extend with sibling architectural assertions (one Go file per invariant).
+- ✅ Fast (low-hundreds-of-ms even at full repo size since we use `parser.ImportsOnly`).
+- ⚠️ Runs at `go test` time, not at compile time. A developer who runs `go build` without `go test` can land a violation locally. CI catches it before merge.
+- ⚠️ The test hardcodes `pkg/capture` as the only allowed importer. If a future ADR moves the adapter, this test must move with it.
+
+**Rejected alternatives.**
+- *Custom `go vet` analyzer.* More complex, needs separate distribution to developers; benefit is compile-time check, but CI catches this anyway.
+- *Build tag / `//go:build` trick.* Doesn't compose well with the rest of the codebase; non-obvious failure mode.
+- *Convention only, enforced by review.* Will be violated. The whole point of [ADR-0010](#adr-0010-obi-version-pinning-and-adapter) is mechanical isolation.
+
+**Implemented in.** `internal/archtest/import_boundary_test.go` (commit landing v0.1).
+
+---
+
 ## Open and superseded ADRs
 
 None yet. New ADRs are appended above this section.
