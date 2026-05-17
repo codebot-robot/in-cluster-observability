@@ -1,0 +1,276 @@
+# Architecture Decisions
+
+**Status:** Accepted, 2026-05-17
+**Owners:** TBD
+
+This is the canonical decision log for the project. Every cross-cutting decision is recorded here as an Architecture Decision Record (ADR). Design documents under [`docs/design/`](.) implement these decisions; if you find a conflict, this file wins and the design doc should be updated.
+
+ADRs are append-only. If a decision is superseded, add a new ADR that supersedes the old one and update the old one's status — do not edit the old text.
+
+> **Convention:** when a design doc cites an ADR, link by ID, e.g. `[ADR-0008](decisions.md#adr-0008-query-language)`. ADR IDs are stable and never reused.
+
+> **Future split:** once this file exceeds ~15 ADRs we will split to `docs/design/decisions/0001-*.md` following the standard ADR-tools layout.
+
+---
+
+## ADR-0001: eBPF data plane = OpenTelemetry eBPF Instrumentation (OBI)
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** The project requires transparent eBPF-based capture of L4 and L7 (HTTP/1.1, HTTP/2, gRPC, A2A) and TLS-decrypted L7. Three viable paths: (a) `opentelemetry-ebpf-instrumentation` (formerly Grafana Beyla, donated to OTel), (b) fork Pixie's PEM data plane, (c) build bespoke on `cilium/ebpf`. Requirements §6 fixed the eBPF approach but left the library choice for design.
+
+**Decision.** Use OBI as the data plane (Go package `go.opentelemetry.io/obi/pkg/ebpf`). Wrap it behind a thin adapter in `core/pkg/capture` (see [ADR-0010](#adr-0010-obi-version-pinning-and-adapter)).
+
+**Consequences.**
+- ✅ OTLP-shaped output matches our pluggable-sink model with no translation layer.
+- ✅ HTTP/1.1, HTTP/2, gRPC, SQL, and GenAI (OpenAI/Anthropic/Gemini) instrumentation is already shipped — the GenAI surface directly serves our "AI agents calling AI agents" use case.
+- ✅ Kubernetes pod identity attachment is already implemented (Beyla-pattern); we inherit topology basics.
+- ✅ Apache 2.0, vendor-neutral OTel governance, active development.
+- ✅ `Tracer` interface allows custom protocol modules — A2A and (eventually) Kafka can be added without forking.
+- ⚠️ OBI is v0.8 (April 2026) and promises breaking changes per minor — mitigated by [ADR-0010](#adr-0010-obi-version-pinning-and-adapter).
+- ⚠️ TLS coverage is less deep than Pixie's; mitigated by upstream contribution policy in [ADR-0010](#adr-0010-obi-version-pinning-and-adapter).
+- ❌ Kafka protocol parser not yet in OBI — deferred to roadmap.
+
+**Rejected alternatives.**
+- *Fork Pixie PEM.* Mature and battle-tested, but tightly coupled to Pixie's CMU column store and PxL execution model. Ripping out PEM's data plane to swap in our own would consume the very engineering capacity that's supposed to differentiate us from Pixie.
+- *Bespoke on `cilium/ebpf`.* Rebuilding HTTP/2 + gRPC parsing + TLS uprobes is multiple person-years OBI has already done.
+
+---
+
+## ADR-0002: In-cluster store = Prometheus tsdb HEAD block + parallel ring buffer
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Each node needs a short-retention store sized for HPA's decision window and AI-agent recent-history queries. Required: bounded memory, sub-second filter+group-by, crash recovery. Options: flat files (the POC), embedded SQL/column store (DuckDB, ClickHouse-lite), Prometheus `tsdb` HEAD as a library, hand-roll.
+
+**Decision.** Use Prometheus `tsdb` HEAD block (`github.com/prometheus/prometheus/tsdb`) as a library for **metrics**. Use a parallel typed in-memory append-only ring buffer for **spans and topology edges** that don't fit tsdb's series model. Both back themselves to disk per [ADR-0012](#adr-0012-tsdb-block-duration-and-wal-strategy).
+
+**Consequences.**
+- ✅ Thanos and Cortex prove tsdb HEAD is usable as a library — we are not the trailblazer.
+- ✅ PromQL is the operationally-familiar query language for K8s metrics; HPAs already think in it.
+- ✅ Apache 2.0, pure Go, no cgo.
+- ✅ OTLP → Prometheus mapping is stable and well-defined.
+- ⚠️ tsdb's data model is metrics-only; spans and edges need a parallel path. Acceptable; the ring buffer is small.
+- ❌ We don't get SQL-style joins. We accept this — our queries are filter-then-group-then-aggregate, which PromQL covers.
+
+**Rejected alternatives.**
+- *DuckDB.* Excellent columnar engine, but embedding a C++ database in a per-node DaemonSet on COS adds cgo, binary size, and libc/kernel fragility we don't need.
+- *Hand-roll a column buffer.* We would end up shaped like tsdb HEAD anyway, having reinvented WAL and label indexing.
+- *VictoriaMetrics-style custom store.* Not usable as a library — it's a server, not a kit.
+
+---
+
+## ADR-0003: Onboarding model = hybrid CRD
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Requirements §2.2 required hybrid onboarding: a cluster-wide default plus per-workload opt-in/opt-out. CRDs are the K8s-idiomatic primitive and align with `PodMonitoring` (GKE Managed Prometheus) and `ServiceMonitor` (Prometheus Operator).
+
+**Decision.** Two CRDs:
+- `TrafficMonitor` — **namespaced**, selects workloads by labels, declares protocols/ports/cardinality knobs.
+- `ClusterTrafficPolicy` — **cluster-scoped**, declares the default policy applied to pods not covered by any `TrafficMonitor`. Singleton recommended but not enforced; if multiple exist, the most-specific (by ordered priority field) wins.
+
+**Consequences.**
+- ✅ Aligns mental model with existing K8s monitoring CRDs.
+- ✅ Cluster operators get one-CR coverage; workload teams get per-namespace overrides.
+- ⚠️ Conflict resolution (multiple `TrafficMonitor`s selecting the same pod) requires care; see [`control-plane.md`](control-plane.md) for the resolution algorithm.
+
+---
+
+## ADR-0004: Library + controller posture; public API in `pkg/`
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Requirements §2.4 made "third parties can wrap us and register their own sinks" a load-bearing requirement, not a nice-to-have.
+
+**Decision.** Ship as both a deployable controller binary and an importable Go library. Public API in `core/pkg/{capture,store,query,sink,topology,controller}`; everything else under `core/internal/`. Embedders import only what they need; the default binary registers all built-in sinks and CRD watchers.
+
+**Consequences.**
+- ✅ Third-party integrators get a clean import boundary — `pkg/` is supported; `internal/` is fair game to change.
+- ✅ The default binary remains useful for non-embedders out of the box.
+- ⚠️ Public API maintenance burden — see [`public-api.md`](public-api.md) for stability tiers.
+
+---
+
+## ADR-0005: Topology via Kubelet PID mapping + K8s informer
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Requirements §2.1 required source and peer K8s identity on every record. We need (a) PID → local pod, (b) IP → remote pod/service.
+
+**Decision.** Local PID mapping comes from the node-local Kubelet `/pods` API plus `/proc/<pid>/cgroup` cross-reference, cached. Remote IP resolution comes from a K8s informer watching Pods + Services + EndpointSlices. Custody of that informer is [ADR-0009](#adr-0009-informer-custody--hybrid). Attribute namespace follows OTel semantic conventions: `k8s.pod.*`, `k8s.namespace.*`, `k8s.deployment.*`, `service.name`, mirrored as `peer.k8s.*` for the destination side.
+
+**Consequences.**
+- ✅ Inherits Beyla-pioneered pattern; OBI already provides much of the source-side attribution.
+- ✅ Standard OTel semconv → off-the-shelf dashboards and downstream consumers Just Work.
+- ⚠️ Informer-related API-server load — addressed by [ADR-0009](#adr-0009-informer-custody--hybrid).
+
+---
+
+## ADR-0006: Kernel/distro target = COS 125+, kernel 6.x, BTF/CO-RE required
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Per requirements §3. OBI itself requires Linux ≥ 5.8 with BTF, amd64 or arm64 (with a documented RHEL-family 4.18+ exception we are not using). cos-125 ships kernel 6.x.
+
+**Decision.** Floor: Google Container-Optimized OS `cos-125-*`, kernel 6.x, BTF/CO-RE required, amd64 and arm64 only. GKE 1.35+ if any K8s API surface forces it. No legacy / non-BTF kernel paths.
+
+**Consequences.**
+- ✅ All modern eBPF features available (ring buffers, BTF, CO-RE, fentry/fexit, sleepable programs).
+- ✅ No CO-RE relocation fallbacks; binary size and complexity stay small.
+- ❌ Will not run on older distros. Documented constraint; not a regression.
+
+---
+
+## ADR-0007: License = Apache 2.0
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Requirements §3. Per [`.ap/headers.yaml`](../../.ap/headers.yaml) Apache 2.0 headers are auto-injected on Go and shell files.
+
+**Decision.** Apache 2.0 for our code; every direct dependency must be Apache-2.0-compatible.
+
+**Consequences.**
+- ✅ Permissive, widely adopted, compatible with OBI, Prometheus tsdb, cilium/ebpf, k8s.io/client-go.
+- ⚠️ GPL-only kernel headers in eBPF C are fine — eBPF programs typically declare `LICENSE = "Dual BSD/GPL"` in the `.bpf.c` itself, which is a kernel-verifier requirement not a license on our Go.
+
+---
+
+## ADR-0008: Query language
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Multiple consumers want different query semantics. HPA wants "give me a number." AI agents want filterable streams. Ops wants Prometheus-shaped scrape. Prior plans punted this as "PromQL + custom-for-spans (CEL?)" — the Plan-agent review correctly identified that as the single biggest under-decided item.
+
+**Decision.**
+- **PromQL** is the query language for **metrics** (tsdb-backed). Standard syntax, no extensions. Consumers: HPA's `custom.metrics.k8s.io` adapter, Prometheus scrape, ops dashboards.
+- **CEL** is the query language for **spans, topology edges, and anything in the ring buffer** (non-tsdb data). CEL expressions are compiled against the OTLP proto types and evaluated per record. Consumers: AI agent streaming subscribers, `otelctl`-equivalent CLI, future UI.
+
+The two languages serve disjoint data types; consumers pick the one matching what they want. The query server's gRPC API exposes both via separate methods (`QueryMetrics` taking PromQL, `QuerySpans` / `QueryEdges` taking CEL).
+
+**Worked examples:**
+- *HPA:* PromQL `avg(rate(ollie_http_requests_total{service="backend"}[1m]))` → custom-metrics-API adapter wraps the scalar result. See [`storage-and-query.md`](storage-and-query.md#hpa-example).
+- *AI agent:* CEL `span.attributes["k8s.namespace.name"] == "payments" && span.duration_ms > 100` over the spans streaming endpoint. See [`storage-and-query.md`](storage-and-query.md#ai-agent-example).
+- *Prometheus scrape:* `/metrics` endpoint exposes the tsdb directly; consumers issue PromQL against whatever scrapes us.
+
+**Consequences.**
+- ✅ Each consumer gets the language fit for its data; no awkward bridging.
+- ✅ PromQL is operationally familiar; CEL is the standard for in-cluster policy filtering (admission webhooks, etc.).
+- ⚠️ Two languages = more docs and examples to maintain. Accepted.
+- ⚠️ Cross-data-type queries ("show me HTTP error rate AND the spans that produced them") require two calls. Acceptable for v1; revisit if pain emerges.
+
+**Rejected alternatives.**
+- *PromQL only.* Spans and edges aren't time series in the labeled-counter sense; jamming them into PromQL is hostile to span-shaped queries.
+- *CEL only.* Loses PromQL's rate/avg/histogram functions and the HPA adapter would have to reimplement them.
+- *Custom DSL.* Unjustified novelty. Both PromQL and CEL are off-the-shelf libraries.
+
+---
+
+## ADR-0009: Informer custody = hybrid
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Remote IP → pod/service resolution requires a K8s informer cache. Three options: (a) every agent runs its own informer (no central dependency, but N× API-server load on large clusters), (b) only the controller runs it and pushes to agents (one informer total, but controller becomes a critical-path dependency for capture), (c) hybrid — controller canonical, agent local fallback. Requirements §7.3 left this open.
+
+**Decision.** Hybrid. The controller (leader-elected) runs the canonical informer for Pods, Services, and EndpointSlices. The controller broadcasts identity deltas to agents over the same gRPC stream used to distribute `MonitoringSpec` ([`control-plane.md`](control-plane.md)). Each agent maintains a local fallback informer that is **inactive** by default and activated only if the controller's heartbeat misses ≥3 intervals (default 15s). Once the controller is reachable again, the agent's fallback informer drops back to inactive after a hold-down period (60s) to avoid flapping.
+
+**Consequences.**
+- ✅ API-server load = 1 informer set in steady state.
+- ✅ Controller is not a hard data-plane dependency — agents keep monitoring through controller outages.
+- ⚠️ Agent has informer code it usually doesn't run. Memory cost is real but bounded.
+- ⚠️ Brief transient mismatch on controller failover (agent activates local informer; one delta might be doubly-applied). Idempotent updates handle this.
+
+**Rejected alternatives.**
+- *Agents-only.* Scales linearly with node count; on 1000-node clusters that's 1000× the watch load.
+- *Controller-only.* Controller failure stops identity resolution; new pods get unattributed flow records until recovery.
+
+---
+
+## ADR-0010: OBI version pinning and adapter
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** OBI is v0.8 and explicitly says minor releases may break API and behavior. We depend on it for the deepest part of the stack. Direct dependency would make every OBI bump a project-wide refactor.
+
+**Decision.** All OBI usage lives behind `core/pkg/capture`, a thin adapter that exposes:
+- `type Tracer interface { ... }` — our trimmed surface (start/stop, AllowPID/BlockPID, callbacks for spans/metrics/events, protocol-module enable/disable).
+- A `New(cfg Config) (Tracer, error)` constructor.
+- No OBI types leak through the boundary; all are translated to our `pkg/capture` types or to OTel SDK types we already depend on.
+
+Version policy:
+- Pin exactly one OBI minor at a time in `go.mod`.
+- Bumping OBI happens in a **dedicated PR** that touches `pkg/capture` only.
+- A **contract-test suite** in `core/pkg/capture/contracttest/` replays recorded eBPF events and synthetic traffic against the adapter; bumps must pass the suite unchanged. New OBI features get new contract tests before being exposed.
+- Fork-vs-upstream criteria for TLS coverage gaps: default to upstream contribution. Fork only if a critical hole sits unmerged for one full OBI release cycle.
+
+**Consequences.**
+- ✅ OBI churn is one-file blast radius, not project-wide.
+- ✅ Contract tests catch behavioral regressions, not just type-shape changes.
+- ⚠️ Adapter is an indirection; reviewers must keep it minimal or it becomes its own forking risk.
+- ⚠️ We are bottlenecked on OBI's release cadence for new protocol modules. Mitigated by ability to register custom `Tracer`s.
+
+---
+
+## ADR-0011: Sink interface shape
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Sinks need to support push (sink-initiated writes to external systems), pull (external systems scrape us), and streaming (long-lived gRPC subscribers). One unified interface fits poorly; three interfaces are clearer.
+
+**Decision.** Three explicit interfaces in `core/pkg/sink`:
+- `PushSink` — `Write(ctx, batch) error`. Core calls into the sink on each write batch.
+- `PullSink` — `RegisterRoutes(mux)`. Core gives the sink a chance to expose HTTP handlers that pull from the store on demand.
+- `StreamingSink` — `Subscribe(ctx, filter) (<-chan Event, error)`. Long-lived; core feeds events into a channel until the consumer disconnects.
+
+All three embed `Lifecycle { Init(ctx, deps) error; Start(ctx) error; Stop(ctx) error; Name() string }`. A single struct can implement multiple interfaces (e.g. the Prometheus sink implements both `PushSink` for remote-write and `PullSink` for the scrape endpoint).
+
+Sinks are registered via `core/pkg/sink.Register(s Sink)` at process start; misbehaving sinks return errors that core counts and continues — a sink cannot crash the agent.
+
+**Consequences.**
+- ✅ Each pattern has the minimal, idiomatic interface.
+- ✅ Embedders implement only what makes sense for their target.
+- ⚠️ Three interfaces = three docs and three example sinks. Accepted.
+
+**Rejected alternatives.**
+- *Single `Sink` interface with mode flags.* Type system can't help; mistakes surface only at runtime.
+- *Channel-based only (push-via-channel).* Doesn't fit pull-style consumers like Prometheus scrape.
+
+---
+
+## ADR-0012: tsdb block duration and WAL strategy
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Prometheus tsdb's block duration is normally 2 hours; that's wrong for our 10-minute retention budget. We also need crash recovery.
+
+**Decision.**
+- Block duration: **2 minutes**. Aligned to the snapshot cadence. Retention = 5 blocks by default (10 minutes total).
+- WAL: enabled, in `/var/lib/ollie/wal/`, with periodic compaction every 30 seconds.
+- Snapshot strategy: tsdb's native block compaction handles it. On crash, WAL replay restores the HEAD; older closed blocks survive on disk.
+
+**Consequences.**
+- ✅ 2-min blocks match our retention granularity; configurable for operators who want longer windows.
+- ✅ WAL recovery is a tsdb-native code path; we don't reinvent.
+- ⚠️ Smaller blocks = more files. Acceptable at our retention sizes.
+
+---
+
+## ADR-0013: Module layout = new `core/` AP root
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** Repo already has three AP roots (`/`, `opentelemetry/`, `obs/`) per [`AGENTS.md`](../../AGENTS.md). The fresh codebase needs a home. Adding to an existing root mixes new design with disposable POC.
+
+**Decision.** Create a new AP root at `core/` with its own `.ap/`, `images/`, `k8s/`, and Go module `github.com/gke-labs/in-cluster-observability/core`. Public packages under `core/pkg/`; private under `core/internal/`. Default binary at `core/cmd/ollie/`. The existing POC roots (`/`, `opentelemetry/`, `obs/`) stay until the new code reaches parity, then get removed in a single cleanup PR.
+
+**Consequences.**
+- ✅ Clean separation between POC and production code during the build phase.
+- ✅ Reuses the project's established AP-root convention.
+- ✅ Module path makes the public API surface obvious to importers.
+- ⚠️ Four AP roots in the repo temporarily. Mitigated by the cleanup-PR commitment.
+
+---
+
+## Open and superseded ADRs
+
+None yet. New ADRs are appended above this section.
