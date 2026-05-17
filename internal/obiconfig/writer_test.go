@@ -1,0 +1,119 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package obiconfig_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gke-labs/in-cluster-observability/internal/obiconfig"
+)
+
+func TestDefaultFile_ShapeMatchesADR(t *testing.T) {
+	f := obiconfig.DefaultFile("127.0.0.1:4317")
+	if f.OtelMetricsExport.Endpoint != "127.0.0.1:4317" {
+		t.Errorf("metrics endpoint = %q; want 127.0.0.1:4317", f.OtelMetricsExport.Endpoint)
+	}
+	if f.OtelTracesExport.Endpoint != "127.0.0.1:4317" {
+		t.Errorf("traces endpoint = %q; want 127.0.0.1:4317", f.OtelTracesExport.Endpoint)
+	}
+	// ADR-0017.4 / ADR-0018: K8s attribute attachment must default off.
+	if f.Attributes.Kubernetes.Enable {
+		t.Error("Attributes.Kubernetes.Enable defaulted true; ADR-0017.4 says off")
+	}
+	if f.Routes == nil || f.Routes.Unmatched != "wildcard" {
+		t.Errorf("routes.unmatched should default to wildcard; got %+v", f.Routes)
+	}
+}
+
+func TestWriter_RejectsBadInputs(t *testing.T) {
+	if _, err := obiconfig.NewWriter(""); err == nil {
+		t.Fatal("empty path should error")
+	}
+	if _, err := obiconfig.NewWriter("/this/parent/does/not/exist/x.yaml"); err == nil {
+		t.Fatal("missing parent directory should error")
+	}
+}
+
+func TestWriter_WritesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, err := obiconfig.NewWriter(path)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	changed, err := w.Write(obiconfig.DefaultFile("127.0.0.1:4317"))
+	if err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if !changed {
+		t.Error("first write should report changed=true")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "otel_metrics_export") {
+		t.Errorf("expected otel_metrics_export in output; got:\n%s", content)
+	}
+	if !strings.Contains(content, "endpoint: 127.0.0.1:4317") {
+		t.Errorf("expected endpoint line in output; got:\n%s", content)
+	}
+	if !strings.Contains(content, "enable: false") {
+		t.Errorf("expected K8s attrs disabled; got:\n%s", content)
+	}
+}
+
+func TestWriter_ShortCircuitsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, _ := obiconfig.NewWriter(path)
+
+	f := obiconfig.DefaultFile("127.0.0.1:4317")
+	if changed, _ := w.Write(f); !changed {
+		t.Fatal("first write should be changed")
+	}
+	if changed, _ := w.Write(f); changed {
+		t.Fatal("repeat write with identical content should be no-op")
+	}
+
+	f.Discovery.Services = []obiconfig.Service{{Name: "test", OpenPorts: []uint16{8080}}}
+	if changed, _ := w.Write(f); !changed {
+		t.Fatal("write with new content should be changed")
+	}
+}
+
+func TestWriter_NoTempArtifactsOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, _ := obiconfig.NewWriter(path)
+	if _, err := w.Write(obiconfig.DefaultFile("127.0.0.1:4317")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".obi-config-") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
