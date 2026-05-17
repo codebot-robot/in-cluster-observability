@@ -1,3 +1,3 @@
 module github.com/gke-labs/in-cluster-observability
 
-go 1.25
+go 1.25.9

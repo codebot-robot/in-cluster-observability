@@ -101,9 +101,15 @@ Every code/config artifact (Go, YAML, Dockerfile, proto, shell) carries the full
 
 ## OBI integration boundary
 
-The only package in the repo that may import `go.opentelemetry.io/obi/*` is `pkg/capture`. Everything else depends on the `capture.Manager` interface. The boundary is enforced by a Go test in [`internal/archtest`](internal/archtest) that parses every `.go` file in the module and fails if any path outside `pkg/capture` imports OBI directly — see [ADR-0010](docs/design/decisions.md#adr-0010-obi-version-pinning-and-adapter) and [ADR-0016](docs/design/decisions.md#adr-0016-obi-import-boundary-enforced-via-go-test).
+Per [ADR-0018](docs/design/decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), OBI runs as a **sibling container** in the agent DaemonSet pod, not as an embedded Go library. The agent is an OTLP receiver that consumes from OBI on localhost.
 
-OBI is pinned to one minor at a time; bumps live in their own PR with the contract-test suite green. See [`docs/design/obi-integration.md`](docs/design/obi-integration.md).
+Consequences for the codebase:
+
+- **No package imports `go.opentelemetry.io/obi/*`.** The boundary is now "zero OBI Go imports anywhere," still enforced by the Go test in [`internal/archtest`](internal/archtest) (see [ADR-0016](docs/design/decisions.md#adr-0016-obi-import-boundary-enforced-via-go-test)).
+- **OBI version pinning is image-tag based**, not `go.mod` based. The pin lives in `k8s/daemonset.yaml` and (once v1.0 lands) `helm/ollie/values.yaml`. Bump policy: one tag at a time, dedicated PR, contract tests green.
+- **`pkg/capture` is the OBI-bridge package** (OTLP receiver + OBI config writer), not a Go-API wrapper. It exposes the same `Manager` interface from v0.1; the implementation talks OTLP and writes OBI's config file.
+
+See [`docs/design/obi-integration.md`](docs/design/obi-integration.md) for the deployment topology, config flow, reload mechanism, and contract-test fixtures.
 
 ## Keeping this file current
 
