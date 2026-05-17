@@ -409,4 +409,3 @@ func (h *bridgeHandler) emit(ctx context.Context, ev Event) {
 		)
 	}
 }
-

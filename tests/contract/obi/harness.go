@@ -55,10 +55,10 @@ var updateGoldens = flag.Bool("update", false, "regenerate golden.json files fro
 // output. Timestamps are normalized to zero so goldens stay stable
 // across runs.
 type goldenEvent struct {
-	Kind      string            `json:"kind"`
-	Module    string            `json:"module"`
-	Metric    *goldenMetric     `json:"metric,omitempty"`
-	Span      *goldenSpan       `json:"span,omitempty"`
+	Kind       string            `json:"kind"`
+	Module     string            `json:"module"`
+	Metric     *goldenMetric     `json:"metric,omitempty"`
+	Span       *goldenSpan       `json:"span,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 

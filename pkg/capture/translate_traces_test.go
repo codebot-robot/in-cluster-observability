@@ -46,7 +46,7 @@ func TestTranslateTraces_HTTP11(t *testing.T) {
 		ScopeSpans: []*tracepb.ScopeSpans{{
 			Spans: []*tracepb.Span{
 				httpSpan("GET /users/42", "GET", "/users/42", "200",
-					/*start*/ 1_000_000_000, /*end*/ 1_012_000_000),
+					/*start*/ 1_000_000_000 /*end*/, 1_012_000_000),
 			},
 		}},
 	}}
