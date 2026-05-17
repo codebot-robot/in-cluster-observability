@@ -28,19 +28,19 @@ const MetricPrefix = "ollie"
 //
 // Stability: Stable
 const (
-	LabelK8sPodName        = "k8s.pod.name"
-	LabelK8sPodUID         = "k8s.pod.uid"
-	LabelK8sNamespaceName  = "k8s.namespace.name"
-	LabelK8sNodeName       = "k8s.node.name"
-	LabelK8sContainerName  = "k8s.container.name"
-	LabelK8sDeploymentName = "k8s.deployment.name"
+	LabelK8sPodName         = "k8s.pod.name"
+	LabelK8sPodUID          = "k8s.pod.uid"
+	LabelK8sNamespaceName   = "k8s.namespace.name"
+	LabelK8sNodeName        = "k8s.node.name"
+	LabelK8sContainerName   = "k8s.container.name"
+	LabelK8sDeploymentName  = "k8s.deployment.name"
 	LabelK8sStatefulSetName = "k8s.statefulset.name"
-	LabelK8sDaemonSetName  = "k8s.daemonset.name"
-	LabelK8sJobName        = "k8s.job.name"
-	LabelK8sReplicaSetName = "k8s.replicaset.name"
-	LabelServiceName       = "service.name"
-	LabelServiceInstanceID = "service.instance.id"
-	LabelServiceNamespace  = "service.namespace"
+	LabelK8sDaemonSetName   = "k8s.daemonset.name"
+	LabelK8sJobName         = "k8s.job.name"
+	LabelK8sReplicaSetName  = "k8s.replicaset.name"
+	LabelServiceName        = "service.name"
+	LabelServiceInstanceID  = "service.instance.id"
+	LabelServiceNamespace   = "service.namespace"
 )
 
 // Peer-side label keys mirror the source-side namespace.

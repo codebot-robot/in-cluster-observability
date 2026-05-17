@@ -37,11 +37,11 @@ func New(cfg Config) (Manager, error) {
 type noopManager struct {
 	cfg Config
 
-	mu       sync.Mutex
-	started  bool
-	stopped  bool
-	modules  map[Module]struct{}
-	pids     map[uint32]PIDSpec
+	mu        sync.Mutex
+	started   bool
+	stopped   bool
+	modules   map[Module]struct{}
+	pids      map[uint32]PIDSpec
 	enrichers []Enricher
 
 	events chan Event

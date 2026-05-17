@@ -23,11 +23,11 @@ import (
 
 type fakeSink struct{ name string }
 
-func (f *fakeSink) Name() string                                 { return f.name }
-func (f *fakeSink) Init(context.Context, sink.Deps) error        { return nil }
-func (f *fakeSink) Start(context.Context) error                  { return nil }
-func (f *fakeSink) Stop(context.Context) error                   { return nil }
-func (f *fakeSink) Write(context.Context, sink.Batch) error      { return nil }
+func (f *fakeSink) Name() string                            { return f.name }
+func (f *fakeSink) Init(context.Context, sink.Deps) error   { return nil }
+func (f *fakeSink) Start(context.Context) error             { return nil }
+func (f *fakeSink) Stop(context.Context) error              { return nil }
+func (f *fakeSink) Write(context.Context, sink.Batch) error { return nil }
 
 func TestRegistry_EmptyByDefault(t *testing.T) {
 	r := sink.NewRegistry()
