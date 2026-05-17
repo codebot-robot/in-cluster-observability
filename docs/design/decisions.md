@@ -462,7 +462,7 @@ The `pkg/capture.Manager` interface from v0.1 stays — its implementation pivot
 - **#76 Self-obs metrics:** unchanged.
 - **#77 Panic recovery:** the agent-side panic recovery shrinks (no eBPF reader goroutine to wrap). What's added is *OBI container health monitoring* — if the OBI sidecar dies repeatedly, our agent emits `incluster_obs_capture_obi_restarts_total` and surfaces the issue. Container restart itself is k8s's job.
 
-**Implemented in.** v0.2 milestone PRs (`v0.2` → `v0.1`) after this ADR lands. The first v0.2 PR will include the manifest update adding the OBI container to the agent DaemonSet.
+**Implementation status.** Approved for v0.2 implementation on 2026-05-17. v0.2 work proceeds under the sibling-container model as documented above; the design is settled and not subject to re-litigation absent new information. Implementation is tracked across milestone v0.2 issues [#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77), whose bodies were updated on the same date to reflect this model. The first v0.2 implementation PR will include the manifest update adding the OBI container to the agent DaemonSet.
 
 ---
 
