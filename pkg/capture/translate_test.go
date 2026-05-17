@@ -88,7 +88,7 @@ func TestTranslateMetrics_L4TCP(t *testing.T) {
 		}},
 	}}
 
-	events := translateMetrics(rm)
+	events := TranslateMetrics(rm)
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events; got %d", len(events))
 	}
@@ -129,7 +129,7 @@ func TestTranslateMetrics_HTTPClassification(t *testing.T) {
 			},
 		}},
 	}}
-	events := translateMetrics(rm)
+	events := TranslateMetrics(rm)
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events; got %d", len(events))
 	}
@@ -141,7 +141,7 @@ func TestTranslateMetrics_HTTPClassification(t *testing.T) {
 }
 
 func TestTranslateMetrics_EmptyInput(t *testing.T) {
-	if got := translateMetrics(nil); len(got) != 0 {
+	if got := TranslateMetrics(nil); len(got) != 0 {
 		t.Errorf("nil input should produce no events; got %d", len(got))
 	}
 }

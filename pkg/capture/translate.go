@@ -22,7 +22,7 @@ import (
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-// translateMetrics walks an OTLP ResourceMetrics tree and emits a
+// TranslateMetrics walks an OTLP ResourceMetrics tree and emits a
 // capture.Event per datapoint. Resource attributes are merged into
 // each event's Attributes map; OBI's k8s.* attrs are stripped per
 // ADR-0017.4 (we re-attribute via pkg/topology in v0.3).
@@ -30,7 +30,7 @@ import (
 // Per ADR-0017.5, v0.2 carries the minimal field set: name + value +
 // (peer + direction) attrs. Names are passed through unchanged;
 // renaming to the canonical ollie_* prefix happens later.
-func translateMetrics(rms []*metricspb.ResourceMetrics) []Event {
+func TranslateMetrics(rms []*metricspb.ResourceMetrics) []Event {
 	var out []Event
 	now := time.Now()
 	for _, rm := range rms {

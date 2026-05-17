@@ -51,7 +51,7 @@ func TestTranslateTraces_HTTP11(t *testing.T) {
 		}},
 	}}
 
-	events := translateTraces(rs)
+	events := TranslateTraces(rs)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event; got %d", len(events))
 	}
@@ -102,7 +102,7 @@ func TestTranslateTraces_LegacySemconv(t *testing.T) {
 			}},
 		}},
 	}}
-	events := translateTraces(rs)
+	events := TranslateTraces(rs)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event; got %d", len(events))
 	}
@@ -121,7 +121,7 @@ func TestTranslateTraces_NoDuration(t *testing.T) {
 			Spans: []*tracepb.Span{{Name: "no-time"}}, // both timestamps zero
 		}},
 	}}
-	events := translateTraces(rs)
+	events := TranslateTraces(rs)
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event; got %d", len(events))
 	}
@@ -131,7 +131,7 @@ func TestTranslateTraces_NoDuration(t *testing.T) {
 }
 
 func TestTranslateTraces_EmptyInput(t *testing.T) {
-	if got := translateTraces(nil); len(got) != 0 {
+	if got := TranslateTraces(nil); len(got) != 0 {
 		t.Errorf("nil input should produce no events; got %d", len(got))
 	}
 }

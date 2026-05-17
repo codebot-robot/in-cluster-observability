@@ -373,7 +373,7 @@ type bridgeHandler struct {
 
 func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.ExportMetricsServiceRequest) error {
 	defer h.b.recoverPanic("receiver_metrics", ModuleL4TCP)
-	for _, ev := range translateMetrics(req.GetResourceMetrics()) {
+	for _, ev := range TranslateMetrics(req.GetResourceMetrics()) {
 		h.emit(ctx, ev)
 	}
 	return nil
@@ -381,7 +381,7 @@ func (h *bridgeHandler) OnMetrics(ctx context.Context, req *collmetricspb.Export
 
 func (h *bridgeHandler) OnTraces(ctx context.Context, req *colltracepb.ExportTraceServiceRequest) error {
 	defer h.b.recoverPanic("receiver_traces", ModuleHTTP1)
-	for _, ev := range translateTraces(req.GetResourceSpans()) {
+	for _, ev := range TranslateTraces(req.GetResourceSpans()) {
 		h.emit(ctx, ev)
 	}
 	return nil

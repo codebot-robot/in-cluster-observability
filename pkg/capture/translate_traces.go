@@ -22,7 +22,7 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-// translateTraces walks an OTLP ResourceSpans tree and emits a
+// TranslateTraces walks an OTLP ResourceSpans tree and emits a
 // capture.Event{Kind:Span} per Span. Per ADR-0017.5 (HTTP/1.1
 // focused), spans are decoded with the minimal field set: method,
 // path (raw), status, duration_ns.
@@ -31,7 +31,7 @@ import (
 // the current `http.request.method` / `url.path` /
 // `http.response.status_code` shape and the older `http.method` /
 // `http.url` / `http.status_code` shape.
-func translateTraces(rs []*tracepb.ResourceSpans) []Event {
+func TranslateTraces(rs []*tracepb.ResourceSpans) []Event {
 	var out []Event
 	now := time.Now()
 	for _, r := range rs {
