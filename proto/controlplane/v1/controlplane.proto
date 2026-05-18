@@ -1,0 +1,154 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Ollie control-plane↔agent gRPC service (v1alpha1). See
+// docs/design/control-plane.md §4 and ADR-0022 for the design and
+// the v0.4 scope cuts (identity messages reserved but not used).
+
+syntax = "proto3";
+
+package ollie.controlplane.v1;
+
+option go_package = "github.com/gke-labs/in-cluster-observability/pkg/controller/pb";
+
+import "google/protobuf/timestamp.proto";
+
+// ControlPlane is the bidirectional stream between the agent on each
+// node and the controller (leader). The agent opens the stream; the
+// controller sends MonitoringSpec deltas + heartbeats; the agent
+// sends hello + heartbeats + per-pod status.
+service ControlPlane {
+  // AgentSession is a long-lived bidirectional stream. One per agent
+  // per controller-leader. On leader change the agent reconnects.
+  rpc AgentSession(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+// AgentMessage is anything the agent sends up the stream.
+message AgentMessage {
+  oneof body {
+    AgentHello hello = 1;
+    AgentHeartbeat heartbeat = 2;
+    AgentStatus status = 3;
+    AgentLocalDigest digest = 4;  // for resync detection on reconnect
+  }
+}
+
+// ControllerMessage is anything the controller sends down the stream.
+// Tags 3 (identity_snapshot), 4 (identity_delta), 5 (sink_rotation)
+// are reserved for forward compatibility — no payload in v0.4 per
+// ADR-0022.5.
+message ControllerMessage {
+  oneof body {
+    ControllerHello hello = 1;
+    MonitoringSpecDelta spec_delta = 2;
+    // 3 = identity_snapshot (reserved, see ADR-0022.5)
+    // 4 = identity_delta (reserved, see ADR-0022.5)
+    // 5 = sink_rotation (reserved)
+    Heartbeat heartbeat = 6;
+  }
+}
+
+// AgentHello opens the session.
+message AgentHello {
+  string node_name = 1;
+  string agent_version = 2;
+  // SupportedModules lists capture.Module names the agent's OBI
+  // build supports — controller filters MonitoringSpec deltas to
+  // modules the agent can actually do.
+  repeated string supported_modules = 3;
+}
+
+// ControllerHello acknowledges the session.
+message ControllerHello {
+  string controller_version = 1;
+  // MinAgentVersion is the minimum agent version this controller will
+  // serve. Agent must disconnect and not retry if its version is
+  // below this — agent operator needs to upgrade.
+  string min_agent_version = 2;
+}
+
+// AgentHeartbeat fires every ~5s while the stream is up.
+message AgentHeartbeat {
+  google.protobuf.Timestamp ts = 1;
+  uint32 active_monitor_count = 2;
+  map<string, uint64> module_event_counts = 3;
+  int64 last_known_generation = 4;
+}
+
+// Heartbeat from controller back to agent. Same shape both
+// directions (just an ack); separate message type lets us add
+// directional fields later without a breaking change.
+message Heartbeat {
+  google.protobuf.Timestamp ts = 1;
+}
+
+// AgentStatus reports per-pod monitoring health back so the
+// controller can populate CR status. Sent on per-pod state changes
+// (apply success, apply failure, pod going away).
+message AgentStatus {
+  string pod_uid = 1;
+  bool active = 2;
+  uint32 active_pids = 3;
+  string error = 4;
+}
+
+// AgentLocalDigest is sent on reconnect so the controller can diff
+// against current state and send only the necessary deltas.
+message AgentLocalDigest {
+  // Map of pod_uid → generation the agent currently has applied.
+  map<string, int64> pod_generations = 1;
+}
+
+// MonitoringSpecDelta is one apply-or-remove operation against the
+// agent's local pod_uid → MonitoringSpec map.
+message MonitoringSpecDelta {
+  enum Op {
+    OP_UNSPECIFIED = 0;
+    UPSERT = 1;
+    REMOVE = 2;
+  }
+  Op op = 1;
+  MonitoringSpec spec = 2;
+  // Generation is monotonic per pod_uid; agent ignores deltas with
+  // generation <= last seen.
+  int64 generation = 3;
+}
+
+// MonitoringSpec is the per-pod "what to capture" record. v0.4
+// fields map 1:1 onto obiconfig.Instrument on the agent side; see
+// docs/design/control-plane.md §2.3.
+message MonitoringSpec {
+  string pod_uid = 1;
+  string pod_name = 2;
+  string namespace = 3;
+  string node_name = 4;
+
+  // PIDHints is the controller's best knowledge of which PIDs this
+  // pod's containers map to. Empty means agent resolves locally
+  // via cgroup / container-id lookup.
+  repeated uint32 pid_hints = 5;
+
+  // Protocols is a bitset (high bit reserved). Module values match
+  // capture.Module in the agent.
+  uint32 protocols = 6;
+
+  // HTTPPorts and similar — used to populate the OBI
+  // discovery.instrument open_ports selector.
+  repeated uint32 http_ports = 7;
+
+  // SourceRef is "TrafficMonitor namespace/name" or
+  // "ClusterTrafficPolicy name" — agent doesn't act on it but it
+  // helps debugging.
+  string source_ref = 8;
+}
