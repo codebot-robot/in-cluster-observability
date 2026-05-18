@@ -522,6 +522,57 @@ The `pkg/capture.Manager` interface from v0.1 stays — its implementation pivot
 
 ---
 
+## ADR-0021: Lean v0.3 — agent re-uses OBI's native enrichment
+
+**Status:** Accepted, 2026-05-18 — supersedes [ADR-0017.4](#174-strip-obis-built-in-kubernetes-attribution); supersedes the storage / enricher / scrape-sink sub-decisions in [ADR-0020](#adr-0020-v03-storage-mvp-implementation-decisions); the WAL deferral in ADR-0020.7 is moot (no `pkg/store` metric path to back).
+
+**Context.** The first cut at v0.3 ("Storage MVP") landed `internal/pidcache`, `internal/enricher`, `pkg/sink/promscrape`, `pkg/store.MetricStore`, and a metric-name translator that rewrote OBI's metric names to an `ollie_*` prefix. End-to-end smoke testing in Kind exposed two things:
+
+1. OBI v0.9 already ships everything those packages reimplemented: a K8s informer (`OTEL_EBPF_KUBE_METADATA_ENABLE`) that attaches a *superset* of the labels our enricher attached (`k8s.namespace.name`, `k8s.deployment.name`, `k8s.statefulset.name`, `k8s.replicaset.name`, `k8s.daemonset.name`, `k8s.node.name`, `k8s.pod.name`, `k8s.container.name`, `k8s.pod.uid`, `k8s.pod.start_time`, `k8s.cluster.name`), a Prometheus exporter, and OTel-standard metric names. Our pidcache was a Kubelet-only reimplementation of OBI's informer; our enricher attached a strict subset; our promscrape sink wrapped an exporter OBI already ships; our metric-name rewrite added nothing.
+2. The agent had never actually been driving OBI's discovery in production because `--config=...` is not OBI's flag — it reads `OTEL_EBPF_CONFIG_PATH` instead, and our manifest was passing the wrong knob. The "Storage MVP" was capturing L4 (which uses an in-kernel socket filter and ignores discovery) and silently producing zero L7 events.
+
+The build-it-ourselves direction was therefore both unnecessary (OBI does it) and incorrect (we'd been masking the fact that the file we wrote was never being read). The genuinely-unique value of this project lives one layer up: declarative CRD-driven onboarding (v0.4), in-cluster storage + query plane (v0.5), HPA custom-metrics API (v0.5), AI-agent CEL streaming (v0.5), and dual-sided edge identity (v0.5). v0.3 should stop replicating OBI and start being the thin agent + production-deployment milestone those layers sit on.
+
+**Decision.** Lean v0.3:
+
+- **OBI does enrichment.** OBI's K8s informer is on (`OTEL_EBPF_KUBE_METADATA_ENABLE=autodetect`, `attributes.kubernetes.enable: true`). The agent does not run its own informer or PID cache.
+- **OBI's metric/span names are exported verbatim.** The OTLP→Event translator passes names through; no `ollie_*` prefix rewrite.
+- **Single scrape URL through the agent.** OBI exports OTLP to the agent's loopback receiver; the agent re-exposes the metric stream via the OTel SDK's Prometheus exporter on `:9090`. The OBI process never exposes a port of its own.
+- **No pidcache, enricher, MetricStore wrapper, or dedicated promscrape package.** `internal/pidcache`, `internal/enricher`, `pkg/sink/promscrape`, and `pkg/store/metric_store.go` are deleted.
+- **The OTLP receiver stays.** It is the hook point for v0.4 (controller-driven per-event filtering) and v0.5 (storage). v0.3 keeps it as a near-passthrough; this is the deliberate carve-out from the simplification.
+- **`pkg/store.SpanEdgeStore` + `Ring[T]` stay.** v0.5 needs them for the span/edge query path; they have no equivalent in OBI.
+- **`pkg/schema` stays** as the source of label-key / bucket constants for the future store. The metric-name constants are no longer used at write time (OBI's names go through) but remain as the canonical schema reference.
+- **Kubernetes manifests gain the RBAC OBI's informer requires:** ServiceAccount + ClusterRole granting `list,watch` on pods/services/nodes/replicasets, ClusterRoleBinding.
+- **`--obi-instrument-ports` flag on the agent** seeds OBI's `discovery.instrument` with one synthetic entry until the v0.4 controller drives discovery from `TrafficMonitor` CRs. Without this (or env-var equivalents OBI also accepts), OBI's Application mode has nothing to attach to.
+
+**Consequences.**
+
+- v0.3 ships in ~30% of the code the original "Storage MVP" did. Most of the deletion is in `internal/` (private), so no public API breakage.
+- The agent's job description sharpens to: *write OBI's config + receive its OTLP + expose Prometheus + reserve a hook point for future filtering/storage.* That's the actual project thesis.
+- v0.3's hand-off doc honestly says "OBI does enrichment; this milestone is the production deployment + agent scaffolding." No more pretending the agent does meaningful storage.
+- v0.4 (controller) work is unaffected — the controller targets `bridgeManager.AllowPID` exactly as before, only now AllowPID's emitted `Instrument` entries land in a config file OBI actually reads.
+- v0.5 (store + query + HPA + streaming) is unaffected in scope but the runway is cleaner — no half-built `MetricStore` to retrofit; `SpanEdgeStore` is already in place.
+- [ADR-0017.4](#174-strip-obis-built-in-kubernetes-attribution)'s rationale ("two sources of K8s metadata create ambiguity") is preserved by going the *other* direction: OBI is the single source, our agent has none. The ambiguity is resolved by absence.
+- [ADR-0020](#adr-0020-v03-storage-mvp-implementation-decisions)'s sub-decisions stand or fall as follows:
+  - 20.1 (WAL = tsdb/wal reuse) — moot (no metric store in v0.3); revisits in v0.5 with the real tsdb HEAD wiring.
+  - 20.2 (Kubelet = plain net/http) — withdrawn (no pidcache).
+  - 20.3 (enricher = dedicated `internal/enricher`) — withdrawn (no enricher).
+  - 20.4 (scrape sink = `:9090`) — restated: `:9090` is the OTel SDK Prometheus exporter on the agent, not a dedicated `pkg/sink/promscrape` package.
+  - 20.5 (schema = constants-only) — stands; usage shifts to label-key references rather than metric-name writes.
+  - 20.6 (in-memory mode = empty `WALPath`) — moot (no store in v0.3); v0.5 reconsiders.
+  - 20.7 (tsdb HEAD + WAL deferred) — moot; v0.5's plan is unchanged.
+
+**Rejected alternatives.**
+
+- *Keep the "Storage MVP" framing and fix the bugs.* Would have shipped working code, but it'd still be replicating OBI. The right time to notice was now, not after we'd built three more milestones on top.
+- *Skip the OTLP receiver and point OBI's Prometheus exporter directly at external scrapers.* Cleanest possible v0.3, but eliminates the hook point v0.4/v0.5 need. The OTLP receiver is the cheapest forward-compat we can pay today.
+- *Abandon v0.1 and v0.2 PRs and start the architecture fresh.* Both milestones are correct foundations under either framing (module layout, package skeleton, OBI sibling-container model, OTLP receiver scaffolding, config writer + AllowPID/BlockPID). Only v0.3 needs the rewrite; the prior milestones do not.
+
+---
+
 ## Open and superseded ADRs
 
-None yet. New ADRs are appended above this section.
+- **ADR-0017.4** — superseded by ADR-0021. OBI's native K8s attribute attachment is now ON; the agent attaches none.
+- **ADR-0020** — sub-decisions superseded in part by ADR-0021. See ADR-0021 consequences for the per-clause status.
+
+New ADRs are appended above this section.
