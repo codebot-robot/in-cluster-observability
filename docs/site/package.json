@@ -1,7 +1,7 @@
 {
-  "name": "in-cluster-observability-docs",
+  "name": "ollie-docs",
   "version": "0.0.1",
-  "description": "Build-time deps for the in-cluster-observability Hugo + Docsy docs site. Docsy's CSS pipeline shells out to PostCSS + autoprefixer.",
+  "description": "Build-time deps for the Ollie Hugo + Docsy docs site. Docsy's CSS pipeline shells out to PostCSS + autoprefixer.",
   "license": "Apache-2.0",
   "private": true,
   "scripts": {

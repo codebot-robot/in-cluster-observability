@@ -5,7 +5,7 @@ weight: 20
 description: "Honest v0.3 feature snapshot — what's captured, what the metric names look like, and what's not built yet."
 ---
 
-`in-cluster-observability` is at **v0.3 dev preview**. The capture path works end-to-end on real clusters, but several pieces from the original requirements (CRD-driven onboarding, in-cluster store + PromQL, HPA custom-metrics API, AI-agent streaming, TLS uprobes, peer.k8s.* on the L7 path) are still ahead. This page is the inventory.
+Ollie is at **v0.3 dev preview**. The capture path works end-to-end on real clusters, but several pieces from the original requirements (CRD-driven onboarding, in-cluster store + PromQL, HPA custom-metrics API, AI-agent streaming, TLS uprobes, peer.k8s.* on the L7 path) are still ahead. This page is the inventory.
 
 ## What's captured
 

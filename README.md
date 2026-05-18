@@ -8,27 +8,44 @@ The name plays on **o11y**, the standard observability abbreviation.
 
 ## Status
 
-This repository is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the repo root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) has been removed; it remains on `main` and is reachable via `git log main`.
+**v0.3 dev preview** — the capture pipeline works end-to-end on real clusters. Deploying the DaemonSet on Kind and pointing nginx traffic at it produces `http_server_request_duration{k8s_pod_name="nginx-...",k8s_namespace_name="...",k8s_deployment_name="..."}` lines on the agent's `:9090/metrics` endpoint, with K8s identity attached automatically by OBI. L4 flows even carry dual-sided attribution (`k8s_src_*` + `k8s_dst_*`) for free.
 
-Active development lives on the `rewrite` branch. The **v0.1 Foundation** milestone has landed (scaffolding, public API skeletons, OBI adapter shell, container image, minimal DaemonSet) — the agent deploys but does nothing observable yet. Real eBPF capture lands with v0.2; HPA-ready custom metrics with v0.5; production-ready v1.0 follows.
+What's not yet built: CRD-driven onboarding (v0.4), in-cluster `tsdb` HEAD + PromQL (v0.5), `custom.metrics.k8s.io` for HPA (v0.5), AI-agent CEL streaming (v0.5), HTTP/2 + gRPC + TLS (v0.6), Helm chart + operator runbook (v1.0). Today's coverage is L4 TCP + HTTP/1.1.
+
+**Should you try it now?** See the [self-selection matrix](https://gke-labs.github.io/in-cluster-observability/#should-i-try-this-today) on the docs site — three columns covering who benefits today, who should come back at v0.4–v0.5, and who should wait for v1.0.
 
 Milestones are tracked at [github.com/gke-labs/in-cluster-observability/milestones](https://github.com/gke-labs/in-cluster-observability/milestones).
+
+## Try it on Kind
+
+```sh
+docker build -t ollie:v0.3 -f images/ollie/Dockerfile .
+kind create cluster --name ollie-v03
+kind load docker-image --name ollie-v03 ollie:v0.3
+docker pull otel/ebpf-instrument:v0.9.0
+kind load docker-image --name ollie-v03 otel/ebpf-instrument:v0.9.0
+kubectl apply -k k8s/
+```
+
+Full walkthrough (including the nginx workload + scrape recipe) is in the [Getting started](https://gke-labs.github.io/in-cluster-observability/docs/getting-started/) docs.
 
 ## Where to read what
 
 | You want to | Read |
 |---|---|
-| Understand what we're building | [`docs/requirements.md`](docs/requirements.md) |
-| Understand how we're building it | [`docs/design/architecture.md`](docs/design/architecture.md) |
+| Try it on a real cluster | [Getting started](https://gke-labs.github.io/in-cluster-observability/docs/getting-started/) |
+| See what's actually shipping | [What works today](https://gke-labs.github.io/in-cluster-observability/docs/what-works-today/) |
+| Understand the architecture | [Architecture](https://gke-labs.github.io/in-cluster-observability/docs/architecture/) or [`docs/design/architecture.md`](docs/design/architecture.md) |
+| Understand what we're building (full reqs) | [`docs/requirements.md`](docs/requirements.md) |
 | Read the decision log | [`docs/design/decisions.md`](docs/design/decisions.md) |
-| Set up your environment / contribute | [`AGENTS.md`](AGENTS.md), then [`docs/contributing.md`](docs/contributing.md) |
-| Browse the roadmap | [`docs/design/roadmap.md`](docs/design/roadmap.md) |
+| Contribute | [`AGENTS.md`](AGENTS.md) |
+| Browse the roadmap | [`docs/design/roadmap.md`](docs/design/roadmap.md) or the [docs-site roadmap](https://gke-labs.github.io/in-cluster-observability/docs/roadmap/) |
 
 A polished user-facing README ships with v1.0 ([issue #113](https://github.com/gke-labs/in-cluster-observability/issues/113)). This version is the in-flight pointer.
 
-## Module path
+## Naming
 
-The Go module path remains `github.com/gke-labs/in-cluster-observability` — the repository name. Within the project, binary, image, namespace, and metric prefix are all `ollie`.
+The project is **Ollie** — capitalized in prose, lowercase as the binary / image / metric prefix (`ollie`, `ollie:v0.3`, `ollie_capture_events_total`). The repository name is the more descriptive `gke-labs/in-cluster-observability`; the Go module path matches the repository (`github.com/gke-labs/in-cluster-observability`). The name plays on **o11y**, the standard observability abbreviation.
 
 ## License
 

@@ -5,7 +5,7 @@ weight: 30
 description: "How the agent and OBI fit together — the sibling-container model and why the agent is intentionally thin."
 ---
 
-`in-cluster-observability` is built on top of [OpenTelemetry eBPF Instrumentation (OBI)](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation). OBI does the eBPF capture and K8s metadata enrichment; this project adds the production deployment scaffolding plus an OTLP receiver carve-out that future milestones use as the hook point for CRD-driven onboarding (v0.4) and the in-cluster store (v0.5).
+Ollie is built on top of [OpenTelemetry eBPF Instrumentation (OBI)](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation). OBI does the eBPF capture and K8s metadata enrichment; Ollie adds the production deployment scaffolding plus an OTLP receiver carve-out that future milestones use as the hook point for CRD-driven onboarding (v0.4) and the in-cluster store (v0.5).
 
 This page describes the data path that's actually shipping in v0.3. For the full design log and the reasoning behind each choice, see the [ADRs in the repo](https://github.com/gke-labs/in-cluster-observability/blob/main/docs/design/decisions.md) — especially [ADR-0018](https://github.com/gke-labs/in-cluster-observability/blob/main/docs/design/decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library) (sibling-container model) and [ADR-0021](https://github.com/gke-labs/in-cluster-observability/blob/main/docs/design/decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment) (lean v0.3 pivot to OBI native enrichment).
 

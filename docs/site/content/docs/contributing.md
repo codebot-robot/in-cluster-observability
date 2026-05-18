@@ -2,7 +2,7 @@
 title: "Contributing"
 linkTitle: "Contributing"
 weight: 50
-description: "How to file issues, structure PRs, and work on in-cluster-observability."
+description: "How to file issues, structure PRs, and work on Ollie."
 ---
 
 The canonical contributor reference is [`AGENTS.md`](https://github.com/gke-labs/in-cluster-observability/blob/main/AGENTS.md) in the repo root — it covers conventions, build commands, layout, and the OBI integration boundary. This page is a short pointer.
