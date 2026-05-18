@@ -93,7 +93,12 @@ func main() {
 	}
 
 	dispatcher := stream.NewDispatcher()
-	engine := &reconciler.Engine{Client: mgr.GetClient(), Dispatcher: dispatcher}
+	agentState := stream.NewAgentStateStore()
+	engine := &reconciler.Engine{
+		Client:     mgr.GetClient(),
+		Dispatcher: dispatcher,
+		Agents:     agentState,
+	}
 
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("trafficmonitor").
@@ -128,6 +133,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	cppb.RegisterControlPlaneServer(grpcServer, &stream.Server{
 		Dispatcher: dispatcher,
+		AgentState: agentState,
 		IsLeader: func() bool {
 			select {
 			case <-mgr.Elected():

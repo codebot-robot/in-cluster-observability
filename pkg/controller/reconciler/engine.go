@@ -46,6 +46,10 @@ type Engine struct {
 	Client     client.Client
 	Dispatcher Dispatcher
 
+	// Agents is the per-node agent-status reporter (Phase 3 #93).
+	// May be nil — status writes then report 0 actively-monitored.
+	Agents AgentReporter
+
 	mu sync.Mutex // serializes Recompute; controller-runtime can
 	// dispatch up to N reconciles in parallel via the manager's
 	// MaxConcurrentReconciles knob, but the recompute step is a
@@ -88,18 +92,25 @@ func (e *Engine) Recompute(ctx context.Context) error {
 	for i := range ctpList.Items {
 		ctps = append(ctps, &ctpList.Items[i])
 	}
-
-	out := map[string]*cppb.MonitoringSpec{}
+	pods := make([]*corev1.Pod, 0, len(podList.Items))
 	for i := range podList.Items {
-		pod := &podList.Items[i]
-		if pod.Spec.NodeName == "" {
-			continue
-		}
-		if spec := ComputeSpec(pod, tms, ctps); spec != nil {
-			out[string(pod.UID)] = spec
-		}
+		pods = append(pods, &podList.Items[i])
 	}
-	e.Dispatcher.Apply(out)
+
+	// One pass produces both the dispatcher input and the per-CR
+	// status rollups (covered pods, conflicts).
+	cov := ComputeCoverage(pods, tms, ctps)
+	e.Dispatcher.Apply(cov.Specs)
+
+	// Phase 3: write status back. Errors are non-fatal — a failed
+	// status patch shouldn't block the dispatch path; controller-
+	// runtime will retry on the next reconcile.
+	if err := WriteStatuses(ctx, e.Client, tms, ctps, cov, e.Agents); err != nil {
+		// Surface the error so controller-runtime's rate-limited
+		// retry kicks in, but the deltas have already been
+		// applied so the data plane is correct.
+		return err
+	}
 	return nil
 }
 

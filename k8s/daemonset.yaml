@@ -154,13 +154,24 @@ spec:
             - --otlp-grpc-addr=127.0.0.1:4317
             - --otlp-http-addr=127.0.0.1:4318
             - --obi-config=/etc/ollie/obi-config/config.yaml
-            # v0.3 smoke-test discovery seed (per ADR-0021): until the
-            # v0.4 controller drives discovery from TrafficMonitor CRs,
-            # OBI's Application mode has nothing to attach to. This
-            # seed lets it discover anything listening on these ports.
-            # Tune to whatever your workloads expose.
+            # v0.4: controller gRPC AgentSession stream. When the
+            # controller Deployment (k8s/controller.yaml) is
+            # installed, agents dial it for declarative per-pod
+            # MonitoringSpecs sourced from TrafficMonitor CRs. The
+            # --obi-instrument-ports seed below remains as a
+            # standalone-mode fallback for clusters without the
+            # controller.
+            - --controller-addr=ollie-controller.ollie-system.svc:9102
             - --obi-instrument-ports=80,443,8080,8443
             - --scrape-addr=0.0.0.0:9090
+          env:
+            # Downward API: node name flows into the agent's
+            # AgentHello so the controller can route per-pod deltas
+            # to the right agent session.
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           ports:
             - name: scrape
               containerPort: 9090

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -34,6 +35,21 @@ import (
 
 	cppb "github.com/gke-labs/in-cluster-observability/pkg/controller/pb/controlplane/v1"
 )
+
+// streamSender wraps a gRPC stream's Send with a mutex so the
+// heartbeat goroutine and the handle-loop AgentStatus sends don't
+// race. gRPC streams allow concurrent Send + Recv but require
+// Sends to be serialized.
+type streamSender struct {
+	stream cppb.ControlPlane_AgentSessionClient
+	mu     sync.Mutex
+}
+
+func (s *streamSender) Send(msg *cppb.AgentMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stream.Send(msg)
+}
 
 // Sink is the per-delta consumer the agent supplies — typically a
 // shim around capture.Manager.AllowPID / BlockPID. Keeping the
@@ -161,11 +177,12 @@ func (c *Client) session(ctx context.Context) error {
 	defer conn.Close()
 
 	cp := cppb.NewControlPlaneClient(conn)
-	stream, err := cp.AgentSession(ctx)
+	raw, err := cp.AgentSession(ctx)
 	if err != nil {
 		return fmt.Errorf("open AgentSession: %w", err)
 	}
-	if err := stream.Send(&cppb.AgentMessage{
+	sender := &streamSender{stream: raw}
+	if err := sender.Send(&cppb.AgentMessage{
 		Body: &cppb.AgentMessage_Hello{
 			Hello: &cppb.AgentHello{
 				NodeName:         c.cfg.NodeName,
@@ -187,7 +204,7 @@ func (c *Client) session(ctx context.Context) error {
 				heartbeatErr <- nil
 				return
 			case <-heartbeatTick.C:
-				if err := stream.Send(&cppb.AgentMessage{
+				if err := sender.Send(&cppb.AgentMessage{
 					Body: &cppb.AgentMessage_Heartbeat{
 						Heartbeat: &cppb.AgentHeartbeat{},
 					},
@@ -200,7 +217,7 @@ func (c *Client) session(ctx context.Context) error {
 	}()
 
 	for {
-		msg, err := stream.Recv()
+		msg, err := raw.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil
@@ -212,12 +229,7 @@ func (c *Client) session(ctx context.Context) error {
 			}
 			return fmt.Errorf("recv: %w", err)
 		}
-		if err := c.handle(ctx, msg); err != nil {
-			c.cfg.Logf("agentclient: handle: %v", err)
-			// Don't tear down the session for a per-delta sink
-			// error — log and continue. Repeated errors will
-			// trigger controller-side resync logic eventually.
-		}
+		c.handle(ctx, sender, msg)
 		select {
 		case err := <-heartbeatErr:
 			if err != nil {
@@ -228,19 +240,51 @@ func (c *Client) session(ctx context.Context) error {
 	}
 }
 
-func (c *Client) handle(ctx context.Context, msg *cppb.ControllerMessage) error {
+// handle dispatches one ControllerMessage to the sink and, on
+// MonitoringSpecDelta application, sends an AgentStatus back up
+// the stream so the controller can populate
+// activelyMonitoredPodCount in CR status (Phase 3 #93). Per-delta
+// sink errors are logged but never tear down the session — repeated
+// errors will trigger controller-side resync logic eventually.
+func (c *Client) handle(ctx context.Context, s *streamSender, msg *cppb.ControllerMessage) {
 	if h := msg.GetHello(); h != nil {
 		c.cfg.Logf("agentclient: connected to controller %s", h.GetControllerVersion())
-		return nil
+		return
 	}
-	if delta := msg.GetSpecDelta(); delta != nil {
-		switch delta.GetOp() {
-		case cppb.MonitoringSpecDelta_UPSERT:
-			return c.cfg.Sink.OnUpsert(ctx, delta.GetSpec())
-		case cppb.MonitoringSpecDelta_REMOVE:
-			return c.cfg.Sink.OnRemove(ctx, delta.GetSpec().GetPodUid())
+	delta := msg.GetSpecDelta()
+	if delta == nil {
+		return
+	}
+	switch delta.GetOp() {
+	case cppb.MonitoringSpecDelta_UPSERT:
+		err := c.cfg.Sink.OnUpsert(ctx, delta.GetSpec())
+		c.sendStatus(s, delta.GetSpec().GetPodUid(), err == nil, err)
+		if err != nil {
+			c.cfg.Logf("agentclient: upsert pod=%s: %v", delta.GetSpec().GetPodUid(), err)
+		}
+	case cppb.MonitoringSpecDelta_REMOVE:
+		err := c.cfg.Sink.OnRemove(ctx, delta.GetSpec().GetPodUid())
+		// REMOVE always reports active=false (the agent is no
+		// longer monitoring the pod), regardless of whether the
+		// local BlockPID call errored.
+		c.sendStatus(s, delta.GetSpec().GetPodUid(), false, err)
+		if err != nil {
+			c.cfg.Logf("agentclient: remove pod=%s: %v", delta.GetSpec().GetPodUid(), err)
 		}
 	}
-	// Heartbeat / unknown — no-op.
-	return nil
+}
+
+// sendStatus reports one AgentStatus back to the controller. Send
+// errors are logged but not fatal — the session's outbound side
+// will surface a hard error via heartbeatErr.
+func (c *Client) sendStatus(s *streamSender, podUID string, active bool, sinkErr error) {
+	msg := &cppb.AgentStatus{PodUid: podUID, Active: active}
+	if sinkErr != nil {
+		msg.Error = sinkErr.Error()
+	}
+	if err := s.Send(&cppb.AgentMessage{
+		Body: &cppb.AgentMessage_Status{Status: msg},
+	}); err != nil {
+		c.cfg.Logf("agentclient: send AgentStatus: %v", err)
+	}
 }

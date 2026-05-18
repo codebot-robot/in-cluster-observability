@@ -1,0 +1,106 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# v0.4 ollie-controller — 2-replica Deployment with Lease-based
+# leader election, plus a headless-ish ClusterIP Service the agent
+# DaemonSet dials for the gRPC AgentSession stream.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollie-controller
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollie
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollie
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: ollie-controller
+      containers:
+        - name: controller
+          image: ollie-controller
+          args:
+            - --leader-elect=true
+            - --leader-election-namespace=ollie-system
+            - --metrics-addr=:9100
+            - --probe-addr=:9101
+            - --stream-addr=:9102
+          ports:
+            - name: metrics
+              containerPort: 9100
+            - name: healthz
+              containerPort: 9101
+            - name: stream
+              containerPort: 9102
+          livenessProbe:
+            httpGet: { path: /healthz, port: healthz }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: healthz }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 100Mi
+            limits:
+              cpu: 500m
+              memory: 300Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+---
+# ClusterIP Service for the gRPC stream. Agents resolve
+# ollie-controller.ollie-system.svc.cluster.local:9102 to dial in.
+# Service-level routing distributes new sessions across the two
+# replicas; non-leader replicas reject AgentSession with
+# FailedPrecondition, the agent reconnects, and the K8s endpoint
+# rotation eventually lands it on the leader.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollie-controller
+  namespace: ollie-system
+  labels:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ollie
+    app.kubernetes.io/component: controller
+  ports:
+    - name: stream
+      port: 9102
+      targetPort: stream
+      protocol: TCP
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+      protocol: TCP
