@@ -19,7 +19,7 @@
 //
 //   - api/v1alpha1/  — CRD Go types with +kubebuilder: markers.
 //   - pb/            — generated gRPC service stubs from
-//                      proto/controlplane/v1/controlplane.proto.
+//     proto/controlplane/v1/controlplane.proto.
 //
 // Identity broadcasting (an earlier scope item per ADR-0009) is cut
 // from v0.4 per ADR-0022.5; the validating admission webhook is
