@@ -16,7 +16,7 @@
 # CGO disabled per repo convention; binary is fully static so the
 # final image needs no libc.
 
-ARG VERSION=v0.1.0-dev
+ARG VERSION=v0.3.0-dev
 
 FROM golang:1.25 AS builder
 ARG VERSION
