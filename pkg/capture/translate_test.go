@@ -66,8 +66,8 @@ func TestTranslateMetrics_L4TCP(t *testing.T) {
 	rm := []*metricspb.ResourceMetrics{{
 		Resource: &resourcepb.Resource{
 			Attributes: []*commonpb.KeyValue{
-				strKV("k8s.pod.name", "should-be-stripped"),
-				strKV("service.name", "should-be-stripped"),
+				strKV("k8s.pod.name", "passes-through"),
+				strKV("service.name", "passes-through"),
 				strKV("custom.attr", "kept"),
 			},
 		},
@@ -104,12 +104,14 @@ func TestTranslateMetrics_L4TCP(t *testing.T) {
 			t.Error("Metric payload nil")
 			continue
 		}
-		// K8s + service.name stripped per ADR-0017.4
-		if _, leaked := ev.Metric.Attributes["k8s.pod.name"]; leaked {
-			t.Errorf("k8s.pod.name leaked into Attributes: %v", ev.Metric.Attributes)
+		// Per ADR-0021: OBI is the source of K8s identity. k8s.* and
+		// service.* attrs must pass through so re-emitted Prometheus
+		// metrics carry them.
+		if got := ev.Metric.Attributes["k8s.pod.name"]; got != "passes-through" {
+			t.Errorf("k8s.pod.name should pass through (ADR-0021); got %q in %v", got, ev.Metric.Attributes)
 		}
-		if _, leaked := ev.Metric.Attributes["service.name"]; leaked {
-			t.Errorf("service.name leaked: %v", ev.Metric.Attributes)
+		if got := ev.Metric.Attributes["service.name"]; got != "passes-through" {
+			t.Errorf("service.name should pass through (ADR-0021); got %q in %v", got, ev.Metric.Attributes)
 		}
 		if got := ev.Metric.Attributes["custom.attr"]; got != "kept" {
 			t.Errorf("non-k8s resource attr should pass through; got custom.attr=%q", got)
@@ -143,25 +145,5 @@ func TestTranslateMetrics_HTTPClassification(t *testing.T) {
 func TestTranslateMetrics_EmptyInput(t *testing.T) {
 	if got := TranslateMetrics(nil); len(got) != 0 {
 		t.Errorf("nil input should produce no events; got %d", len(got))
-	}
-}
-
-func TestStripK8sAttrs(t *testing.T) {
-	in := map[string]string{
-		"k8s.pod.name":       "x",
-		"k8s.namespace.name": "y",
-		"service.name":       "z",
-		"peer.address":       "kept",
-		"custom.tag":         "kept",
-	}
-	out := stripK8sAttrs(in)
-	if _, ok := out["k8s.pod.name"]; ok {
-		t.Error("k8s.* should be stripped")
-	}
-	if _, ok := out["service.name"]; ok {
-		t.Error("service.name should be stripped")
-	}
-	if out["peer.address"] != "kept" || out["custom.tag"] != "kept" {
-		t.Errorf("non-stripped keys missing: %v", out)
 	}
 }

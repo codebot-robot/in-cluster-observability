@@ -39,7 +39,7 @@ func TestTranslateTraces_HTTP11(t *testing.T) {
 	rs := []*tracepb.ResourceSpans{{
 		Resource: &resourcepb.Resource{
 			Attributes: []*commonpb.KeyValue{
-				strKV("k8s.pod.name", "drop-me"),
+				strKV("k8s.pod.name", "passes-through"),
 				strKV("custom.tag", "keep-me"),
 			},
 		},
@@ -77,8 +77,8 @@ func TestTranslateTraces_HTTP11(t *testing.T) {
 	if ev.Span.DurationNs != 12_000_000 {
 		t.Errorf("DurationNs = %d; want 12_000_000", ev.Span.DurationNs)
 	}
-	if _, leaked := ev.Span.Attributes["k8s.pod.name"]; leaked {
-		t.Errorf("k8s.pod.name leaked: %v", ev.Span.Attributes)
+	if got := ev.Span.Attributes["k8s.pod.name"]; got != "passes-through" {
+		t.Errorf("k8s.pod.name should pass through (ADR-0021); got %q in %v", got, ev.Span.Attributes)
 	}
 	if got := ev.Span.Attributes["custom.tag"]; got != "keep-me" {
 		t.Errorf("custom.tag = %q; want keep-me", got)

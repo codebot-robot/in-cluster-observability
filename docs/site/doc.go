@@ -12,20 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package capture
-
-// mergeMaps merges b on top of a (b wins on key collisions). Returns
-// a new map; neither input is mutated. Nil-safe.
-func mergeMaps(a, b map[string]string) map[string]string {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
+// Package site is the Hugo + Docsy documentation site for
+// in-cluster-observability. The actual content lives under
+// content/; this file exists only so that `go test ./...` (run
+// by `ap test`) finds at least one Go package in the module —
+// otherwise it errors with "matched no packages" because the
+// only go.mod here is the Hugo module wrapper.
+package site

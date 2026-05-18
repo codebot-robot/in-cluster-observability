@@ -17,4 +17,5 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
+  - rbac.yaml
   - daemonset.yaml

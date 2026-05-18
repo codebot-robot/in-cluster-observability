@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# v0.2 DaemonSet (sibling-container model per ADR-0018):
-#   - obi    : upstream OBI image; privileged (CAP_BPF, hostPID, host
-#              mounts); does the eBPF capture; emits OTLP to localhost.
-#   - agent  : our image; unprivileged; OTLP receiver + OBI config writer.
-# The two share the pod network namespace (loopback OTLP) and an
-# emptyDir at /etc/ollie/obi-config/ for the agent-written OBI config.
+# v0.3 DaemonSet (sibling-container model per ADR-0018; lean shape
+# per ADR-0021):
+#   - obi    : upstream OBI image; eBPF capture + K8s metadata
+#              informer; emits OTLP to the agent on loopback.
+#   - agent  : our image; OTLP receiver + OBI config writer + the
+#              single Prometheus scrape endpoint on :9090.
+# The two containers share the pod network namespace (loopback OTLP)
+# and an emptyDir at /etc/ollie/obi-config/ for the agent-written OBI
+# config file. The pod runs as the ollie-agent ServiceAccount (see
+# k8s/rbac.yaml) so OBI's informer has list/watch on pods/services/
+# nodes/replicasets.
 #
 # Image references use bare names; ap deploy adds the registry prefix.
 # No imagePullPolicy (repo convention).
@@ -41,7 +46,11 @@ spec:
         app.kubernetes.io/name: ollie
         app.kubernetes.io/component: agent
     spec:
-      hostPID: true  # used only by the obi container
+      # ServiceAccount granted list/watch on pods/services/nodes/
+      # replicasets so OBI's K8s metadata informer can attach
+      # k8s.* attrs to captured events (per ADR-0021).
+      serviceAccountName: ollie-agent
+      hostPID: true  # required so OBI can see processes in sibling pods
       containers:
         # Sibling OBI container: privileged, eBPF capture, OTLP -> localhost.
         - name: obi
@@ -49,9 +58,12 @@ spec:
           # Upstream OBI publishes to Docker Hub at otel/ebpf-instrument,
           # not GHCR.
           image: otel/ebpf-instrument:v0.9.0
-          args:
-            - --config=/etc/ollie/obi-config/config.yaml
           env:
+            # OBI v0.9 reads its YAML config from this env var, NOT a
+            # CLI flag. Earlier iterations of this manifest passed
+            # --config=... as args; OBI silently ignored it.
+            - name: OTEL_EBPF_CONFIG_PATH
+              value: "/etc/ollie/obi-config/config.yaml"
             # OBI v0.9+ refuses to start without explicit feature flags.
             # `network`     = L4 TCP metrics (ModuleL4TCP).
             # `application` = L7 HTTP/gRPC spans and metrics
@@ -60,6 +72,16 @@ spec:
             # the agent has its own ollie_capture_* counters.
             - name: OTEL_EBPF_METRICS_FEATURES
               value: "network,application"
+            # Per ADR-0021: OBI is the source of K8s identity. The
+            # informer needs the RBAC granted in k8s/rbac.yaml.
+            - name: OTEL_EBPF_KUBE_METADATA_ENABLE
+              value: "autodetect"
+            # Fail loudly if a required capability is missing rather
+            # than silently no-opping the affected probes. Worth the
+            # CrashLoopBackoff at deploy time — silent cap-gap bugs
+            # are painful to debug otherwise.
+            - name: OTEL_EBPF_ENFORCE_SYS_CAPS
+              value: "true"
             # OBI's HTTP exporter requires a real URL (host:port alone
             # parses as scheme:path and is rejected). Point at the
             # agent's loopback OTLP HTTP listener.
@@ -75,23 +97,32 @@ spec:
               cpu: 500m
               memory: 300Mi
           securityContext:
+            # Capability set matches upstream OBI's documented
+            # unprivileged DaemonSet example. The L7 caps (SYS_PTRACE,
+            # CHECKPOINT_RESTORE, DAC_READ_SEARCH) are what let OBI
+            # cross PID namespaces and read target-process ELF files;
+            # without them Application mode silently no-ops while L4
+            # (socket filter) keeps working — exactly the failure mode
+            # the lean v0.3 smoke test exposed. SYS_ADMIN is only
+            # required for Go context propagation and very old
+            # kernels — kept until those code paths are intentionally
+            # dropped.
             capabilities:
               add:
-                - BPF        # load eBPF programs and create maps
-                - PERFMON    # perf events, ringbuffers
-                - NET_ADMIN  # several BPF program types (e.g. socket-filter
-                             # registration via SO_ATTACH_BPF)
-                - NET_RAW    # raw-socket access; OBI requires this for its
-                             # network-mode socket filter (warned explicitly
-                             # at startup if absent)
-                - SYS_ADMIN  # required by some BPF map operations and uprobe
-                             # attach paths on kernels that haven't fully
-                             # split the cap (Kind nodes share the host
-                             # kernel — Docker Desktop / older GKE host
-                             # kernels often still gate BPF object loads
-                             # behind SYS_ADMIN). Acceptable here because
-                             # OBI's container is the only place we accept
-                             # this; the agent container stays unprivileged.
+                - BPF                # load eBPF programs and create maps
+                - PERFMON            # perf events, ringbuffers
+                - NET_ADMIN          # several BPF program types
+                                     # (e.g. socket-filter registration
+                                     # via SO_ATTACH_BPF)
+                - NET_RAW            # OBI's network-mode socket filter
+                - SYS_PTRACE         # cross container namespaces and
+                                     # inspect target executables
+                                     # (required for L7 discovery)
+                - CHECKPOINT_RESTORE # open target ELF files (uprobe attach)
+                - DAC_READ_SEARCH    # bypass DAC on /proc/<pid>/exe
+                                     # and mounted container roots
+                - SYS_ADMIN          # Go context propagation + some
+                                     # BPF map ops on older kernels
               drop:
                 - ALL
             readOnlyRootFilesystem: true
@@ -107,14 +138,33 @@ spec:
               readOnly: true
             - name: obi-config
               mountPath: /etc/ollie/obi-config
+            # OBI's working directory (per upstream's documented example).
+            - name: var-run-obi
+              mountPath: /var/run/obi
+            # Cgroup access for cross-container process discovery
+            # (per upstream's documented example).
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
 
-        # Agent container: unprivileged; OTLP receiver + OBI config writer.
+        # Agent container: unprivileged; OTLP receiver + OBI config
+        # writer + the single Prometheus scrape endpoint on :9090.
         - name: agent
           image: ollie
           args:
             - --otlp-grpc-addr=127.0.0.1:4317
             - --otlp-http-addr=127.0.0.1:4318
             - --obi-config=/etc/ollie/obi-config/config.yaml
+            # v0.3 smoke-test discovery seed (per ADR-0021): until the
+            # v0.4 controller drives discovery from TrafficMonitor CRs,
+            # OBI's Application mode has nothing to attach to. This
+            # seed lets it discover anything listening on these ports.
+            # Tune to whatever your workloads expose.
+            - --obi-instrument-ports=80,443,8080,8443
+            - --scrape-addr=0.0.0.0:9090
+          ports:
+            - name: scrape
+              containerPort: 9090
+              protocol: TCP
           resources:
             requests:
               cpu: 50m
@@ -149,3 +199,9 @@ spec:
             type: Directory
         - name: obi-config
           emptyDir: {}
+        - name: var-run-obi
+          emptyDir: {}
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory

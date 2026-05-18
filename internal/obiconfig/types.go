@@ -18,11 +18,11 @@
 // and watches this file; the agent writes it on MonitoringSpec changes
 // and OBI reloads.
 //
-// The schema mirrors OBI's YAML config keys for the fields we set. It
-// is intentionally a subset — operators retain control over OBI's other
-// knobs via the install-time base config that this file overlays (TBD
-// in v0.4 when the controller takes over). v0.2 writes a complete file
-// each time; merge semantics with a base config arrive later.
+// The schema mirrors OBI's YAML config keys for the fields we set
+// (verified against otel/ebpf-instrument v0.9). It is intentionally a
+// subset — operators retain control over OBI's other knobs via the
+// install-time base config that this file overlays (TBD in v0.4 when
+// the controller takes over).
 package obiconfig
 
 // File is the on-disk OBI config the agent writes. Marshals to YAML
@@ -48,8 +48,8 @@ type Attributes struct {
 }
 
 // KubernetesAttrs governs OBI's built-in K8s metadata attachment. Per
-// ADR-0017.4 + ADR-0018, we disable this and re-attribute via
-// pkg/topology in v0.3.
+// ADR-0021, OBI is the single source of K8s identity on captured
+// events; the agent attaches none of its own.
 type KubernetesAttrs struct {
 	Enable bool `yaml:"enable"`
 }
@@ -60,38 +60,45 @@ type Routes struct {
 	Unmatched string `yaml:"unmatched,omitempty"`
 }
 
-// Discovery is the per-target instrumentation selector list.
+// Discovery is the per-target instrumentation selector list. The YAML
+// key is `instrument` (OBI v0.9 glob-style); the legacy `services`
+// key is the regex-style equivalent and the *output* schema for
+// already-discovered services — a different shape.
 type Discovery struct {
-	Services []Service `yaml:"services,omitempty"`
+	Instrument []Instrument `yaml:"instrument,omitempty"`
 }
 
-// Service is OBI's discovery selector for an instrumented workload.
-// v0.2 fills in just enough fields for per-PID selection driven by
-// AllowPID; richer selectors (label/namespace) arrive when the
-// controller takes over in v0.4.
-type Service struct {
-	Name      string   `yaml:"name"`
-	Namespace string   `yaml:"namespace,omitempty"`
-	OpenPorts []uint16 `yaml:"open_ports,omitempty"`
-
-	// PIDs is the explicit PID list this service matches. OBI's actual
-	// discovery schema uses richer selectors; for v0.2 we model PID-set
-	// targeting as a virtual selector that the writer translates as
-	// needed (see writer.go). When the schema is verified against a
-	// real OBI image, this field's mapping may change.
-	PIDs []uint32 `yaml:"-"`
+// Instrument is one OBI discovery selector — a process matcher. OBI
+// resolves all configured selectors and instruments any process that
+// matches at least one. An entry must specify at least one selector
+// (OpenPorts, TargetPIDs, ExePath, or similar) or OBI rejects the
+// config at startup.
+type Instrument struct {
+	Name      string `yaml:"name,omitempty"`
+	Namespace string `yaml:"namespace,omitempty"`
+	// OpenPorts matches processes by listening port. OBI's IntEnum
+	// accepts a scalar string ("80", "80,8080", "8000-8999") or a
+	// YAML sequence of ints; we emit the string form for compactness.
+	OpenPorts string `yaml:"open_ports,omitempty"`
+	// TargetPIDs is OBI's `target_pids` selector — an explicit list
+	// of process IDs to instrument. Populated by AllowPID-driven
+	// entries (each entry typically targets a single PID).
+	TargetPIDs []uint32 `yaml:"target_pids,omitempty"`
+	// ExePath is a glob over the process executable path.
+	ExePath string `yaml:"exe_path,omitempty"`
 }
 
 // DefaultFile returns a baseline File with the loopback OTLP endpoints
-// configured and Kubernetes attribute attachment disabled.
+// configured and OBI's K8s metadata informer enabled (per ADR-0021 —
+// OBI owns enrichment, the agent does none).
 //
 // Stability: Experimental
 func DefaultFile(otlpEndpoint string) File {
 	return File{
 		OtelMetricsExport: OTLPExport{Endpoint: otlpEndpoint},
 		OtelTracesExport:  OTLPExport{Endpoint: otlpEndpoint},
-		Attributes:        Attributes{Kubernetes: KubernetesAttrs{Enable: false}},
+		Attributes:        Attributes{Kubernetes: KubernetesAttrs{Enable: true}},
 		Routes:            &Routes{Unmatched: "wildcard"},
-		Discovery:         Discovery{Services: nil},
+		Discovery:         Discovery{Instrument: nil},
 	}
 }

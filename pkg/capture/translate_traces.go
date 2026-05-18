@@ -25,7 +25,8 @@ import (
 // TranslateTraces walks an OTLP ResourceSpans tree and emits a
 // capture.Event{Kind:Span} per Span. Per ADR-0017.5 (HTTP/1.1
 // focused), spans are decoded with the minimal field set: method,
-// path (raw), status, duration_ns.
+// path (raw), status, duration_ns. Per ADR-0021, OBI's k8s.* /
+// service.* attrs flow through unchanged.
 //
 // OBI's exact attribute keys vary by semconv version. We accept both
 // the current `http.request.method` / `url.path` /
@@ -35,10 +36,10 @@ func TranslateTraces(rs []*tracepb.ResourceSpans) []Event {
 	var out []Event
 	now := time.Now()
 	for _, r := range rs {
-		resAttrs := stripK8sAttrs(kvToMap(r.GetResource().GetAttributes()))
+		resAttrs := kvToMap(r.GetResource().GetAttributes())
 		for _, ss := range r.GetScopeSpans() {
 			for _, sp := range ss.GetSpans() {
-				attrs := mergeMaps(resAttrs, stripK8sAttrs(kvToMap(sp.GetAttributes())))
+				attrs := mergeMaps(resAttrs, kvToMap(sp.GetAttributes()))
 				se := &SpanEvent{
 					Name:       sp.GetName(),
 					Method:     pickFirst(attrs, "http.request.method", "http.method"),

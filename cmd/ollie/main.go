@@ -13,32 +13,39 @@
 // limitations under the License.
 
 // Command ollie is the default binary that ships with the project.
-// v0.2 wires the OBI-sibling-container capture pipeline: the agent
-// starts an OTLP receiver on loopback (consuming from the sibling
-// OBI container), an OBI config writer (under a shared volume), and
-// — optionally — a loopback-only debug HTTP endpoint for manual PID
-// control.
 //
-// Real CRD-driven control lands with the controller in v0.4; until
-// then operators drive AllowPID via the debug endpoint when needed
-// (per ADR-0017.3).
+// v0.2 wired the OBI-sibling-container capture pipeline: the agent
+// starts an OTLP receiver on loopback (consuming from the sibling
+// OBI container) and an OBI config writer (under a shared volume).
+//
+// v0.3 (per ADR-0021) keeps the agent thin: OBI does K8s metadata
+// enrichment via its informer, and the agent is the OBI config writer
+// + OTLP receiver carve-out hook point for v0.4 (controller-driven
+// filtering) and v0.5 (in-cluster store + query). Until the v0.4
+// controller exists, --obi-instrument-ports seeds OBI's discovery so
+// Application mode has something to attach to.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
-var version = "v0.2.0-dev"
+var version = "v0.3.0-dev"
 
 func main() {
 	versionOnly := flag.Bool("version", false, "print version and exit")
@@ -47,6 +54,8 @@ func main() {
 	otlpGRPC := flag.String("otlp-grpc-addr", "127.0.0.1:4317", "loopback bind address for OTLP gRPC receiver (consumed from sibling OBI container)")
 	otlpHTTP := flag.String("otlp-http-addr", "127.0.0.1:4318", "loopback bind address for OTLP HTTP receiver")
 	obiConfig := flag.String("obi-config", "/etc/ollie/obi-config/config.yaml", "shared-volume path where the agent writes OBI's config (empty disables writing)")
+	obiInstrumentPorts := flag.String("obi-instrument-ports", "", "seed OBI's discovery.instrument with one entry matching processes on these listening ports (OBI format: \"80\", \"80,8080\", \"8000-8999\"). v0.3 L7 smoke-test knob; harmless once the v0.4 controller pushes per-PID MonitoringSpecs.")
+	scrapeAddr := flag.String("scrape-addr", "0.0.0.0:9090", "bind address for the production Prometheus scrape endpoint at /metrics (empty disables). Per ADR-0021 this is the single scrape URL — exposes both agent self-obs and re-emitted OBI metrics.")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
 
@@ -62,29 +71,41 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "ollie %s\n", version)
-	fmt.Fprintln(os.Stderr, "v0.2 Capture MVP: starting OTLP receiver + OBI config writer (per ADR-0018)")
+	fmt.Fprintln(os.Stderr, "v0.3: OTLP receiver + OBI config writer; OBI does K8s enrichment (per ADR-0021)")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Self-observability: when --debug-endpoint is set, route the
-	// agent's metrics through a Prometheus exporter so they're scrapable
-	// at /debug/metrics on the debug endpoint. The full Prometheus
-	// scrape sink (v0.3 #82) will supersede this with its own listener.
-	var metricsHandler http.Handler
-	captureCfg := capture.Config{
-		OTLPGRPCAddr:  *otlpGRPC,
-		OTLPHTTPAddr:  *otlpHTTP,
-		ObiConfigPath: *obiConfig,
+	// One MeterProvider feeds everything: agent self-obs counters
+	// (ollie_capture_*) and the metric forwarder that re-emits OBI's
+	// translated metrics. The same Prometheus handler backs the
+	// production scrape listener on :9090 and the optional
+	// /debug/metrics on the loopback debug endpoint.
+	mp, promHandler, err := capture.NewPromMeterProvider()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "prometheus exporter init failed: %v\n", err)
+		os.Exit(1)
 	}
-	if *debugEnable {
-		mp, h, err := capture.NewPromMeterProvider()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "prometheus exporter init failed: %v\n", err)
-			os.Exit(1)
-		}
-		captureCfg.MeterProvider = mp
-		metricsHandler = h
+
+	// Always-on "agent is alive and scrape path is wired" signal.
+	// The OTel SDK only materializes a metric stream on first Add/
+	// Record, so a freshly-started agent with no traffic produces an
+	// empty /metrics aside from target_info. This gauge gives
+	// scrapers a non-empty signal from boot.
+	if up, err := mp.Meter("ollie/agent").Float64Gauge("ollie_agent_up",
+		metric.WithDescription("1 if the ollie agent is running and its scrape path is wired"),
+	); err == nil {
+		up.Record(ctx, 1, metric.WithAttributes(
+			attribute.String("version", version),
+		))
+	}
+
+	captureCfg := capture.Config{
+		OTLPGRPCAddr:     *otlpGRPC,
+		OTLPHTTPAddr:     *otlpHTTP,
+		ObiConfigPath:    *obiConfig,
+		InitialOpenPorts: *obiInstrumentPorts,
+		MeterProvider:    mp,
 	}
 
 	mgr, err := capture.NewBridge(captureCfg)
@@ -102,11 +123,38 @@ func main() {
 		_ = mgr.Stop(stopCtx)
 	}()
 	fmt.Fprintf(os.Stderr, "OTLP receiver: gRPC=%s HTTP=%s; OBI config: %s\n", *otlpGRPC, *otlpHTTP, *obiConfig)
+	if *obiInstrumentPorts != "" {
+		fmt.Fprintf(os.Stderr, "OBI smoke-test discovery seeded: open_ports=%s\n", *obiInstrumentPorts)
+	}
 
+	// Production Prometheus scrape listener.
+	var scrapeServer *http.Server
+	if *scrapeAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promHandler)
+		l, err := net.Listen("tcp", *scrapeAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scrape listen %s: %v\n", *scrapeAddr, err)
+			os.Exit(1)
+		}
+		scrapeServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := scrapeServer.Serve(l); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(os.Stderr, "scrape server: %v\n", err)
+			}
+		}()
+		defer func() {
+			sCtx, sCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer sCancel()
+			_ = scrapeServer.Shutdown(sCtx)
+		}()
+		fmt.Fprintf(os.Stderr, "scrape endpoint: http://%s/metrics\n", l.Addr())
+	}
+
+	// Loopback debug endpoint (off by default).
 	if *debugEnable {
-		opts := []debugendpoint.Option{}
-		if metricsHandler != nil {
-			opts = append(opts, debugendpoint.WithExtraHandler("GET /debug/metrics", metricsHandler))
+		opts := []debugendpoint.Option{
+			debugendpoint.WithExtraHandler("GET /debug/metrics", promHandler),
 		}
 		dbg, err := debugendpoint.New(mgr, *debugAddr, opts...)
 		if err != nil {
@@ -122,11 +170,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "debug endpoint enabled on %s (loopback); /debug/metrics serves agent self-obs\n", actualAddr)
 	}
 
-	// Drain Events() in a goroutine so the channel never backs up.
-	// v0.2 doesn't have an enricher / store / sinks yet; events are
-	// silently consumed (counted via ollie_capture_events_total).
+	// Forwarder + writer: re-emit each MetricEvent into the OTel SDK
+	// Meter so OBI's translated metrics flow out via the same
+	// Prometheus exporter the scrape listener serves. SpanEvent /
+	// EdgeEvent are drained for now (v0.5 wires them into the store).
+	fwd := newMetricForwarder(mp.Meter("ollie/obi-forwarder"))
 	go func() {
-		for range mgr.Events() {
+		for ev := range mgr.Events() {
+			if ev.Kind == capture.EventMetric && ev.Metric != nil {
+				fwd.Record(ctx, *ev.Metric)
+			}
 		}
 	}()
 

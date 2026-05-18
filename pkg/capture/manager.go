@@ -108,6 +108,18 @@ type Config struct {
 	// MeterProvider supplies the OTel meter used for self-observability
 	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
 	MeterProvider metric.MeterProvider
+
+	// InitialOpenPorts seeds OBI's discovery.instrument list with one
+	// synthetic "smoke" entry matching any process whose listening
+	// port is in this set. Format is OBI's native open_ports string:
+	// a single port ("80"), comma list ("80,8080"), or range
+	// ("8000-8999"). Only applied when no AllowPID-driven entries
+	// exist, so it is harmless once the v0.4 controller starts
+	// pushing per-PID MonitoringSpecs. Empty by default. Intended
+	// for v0.3 smoke tests of L7 capture before the controller
+	// exists — without it OBI's Application mode has nothing to
+	// attach to and stays silent.
+	InitialOpenPorts string
 }
 
 func (c *Config) applyDefaults() {
@@ -235,15 +247,16 @@ type Event struct {
 // Stability: Experimental
 type MetricEvent struct {
 	// Name is the metric name as emitted by OBI (e.g. tcp.rx.bytes).
-	// The translator does not rename here; renaming to the canonical
-	// ollie_* prefix happens in pkg/schema-driven enrichment in v0.3.
+	// Per ADR-0021 the translator passes names through unchanged; no
+	// `ollie_*` prefix rewrite.
 	Name string
 	// Value is the datapoint's value at the report time (counters
 	// arrive as deltas / sums per OBI's aggregation; this field carries
 	// the raw value reported).
 	Value float64
-	// Attributes is the merged set of resource + datapoint attributes,
-	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	// Attributes is the merged set of resource + datapoint attributes.
+	// Per ADR-0021 OBI is the source of K8s identity, so k8s.* /
+	// service.* attrs flow through unchanged for downstream re-emission.
 	Attributes map[string]string
 }
 
@@ -266,8 +279,8 @@ type SpanEvent struct {
 	StatusCode int
 	// DurationNs is the span duration in nanoseconds.
 	DurationNs uint64
-	// Attributes is the merged set of resource + span attributes,
-	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	// Attributes is the merged set of resource + span attributes.
+	// Per ADR-0021 OBI's k8s.* / service.* attrs flow through.
 	Attributes map[string]string
 }
 

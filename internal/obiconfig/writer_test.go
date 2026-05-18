@@ -31,9 +31,10 @@ func TestDefaultFile_ShapeMatchesADR(t *testing.T) {
 	if f.OtelTracesExport.Endpoint != "127.0.0.1:4317" {
 		t.Errorf("traces endpoint = %q; want 127.0.0.1:4317", f.OtelTracesExport.Endpoint)
 	}
-	// ADR-0017.4 / ADR-0018: K8s attribute attachment must default off.
-	if f.Attributes.Kubernetes.Enable {
-		t.Error("Attributes.Kubernetes.Enable defaulted true; ADR-0017.4 says off")
+	// ADR-0021 (supersedes ADR-0017.4): OBI is the single source of
+	// K8s identity on captured events; the informer must default on.
+	if !f.Attributes.Kubernetes.Enable {
+		t.Error("Attributes.Kubernetes.Enable defaulted false; ADR-0021 says on (OBI owns enrichment)")
 	}
 	if f.Routes == nil || f.Routes.Unmatched != "wildcard" {
 		t.Errorf("routes.unmatched should default to wildcard; got %+v", f.Routes)
@@ -76,8 +77,8 @@ func TestWriter_WritesAtomically(t *testing.T) {
 	if !strings.Contains(content, "endpoint: 127.0.0.1:4317") {
 		t.Errorf("expected endpoint line in output; got:\n%s", content)
 	}
-	if !strings.Contains(content, "enable: false") {
-		t.Errorf("expected K8s attrs disabled; got:\n%s", content)
+	if !strings.Contains(content, "enable: true") {
+		t.Errorf("expected K8s attrs enabled (ADR-0021); got:\n%s", content)
 	}
 }
 
@@ -94,9 +95,42 @@ func TestWriter_ShortCircuitsUnchanged(t *testing.T) {
 		t.Fatal("repeat write with identical content should be no-op")
 	}
 
-	f.Discovery.Services = []obiconfig.Service{{Name: "test", OpenPorts: []uint16{8080}}}
+	f.Discovery.Instrument = []obiconfig.Instrument{{Name: "test", OpenPorts: "8080"}}
 	if changed, _ := w.Write(f); !changed {
 		t.Fatal("write with new content should be changed")
+	}
+}
+
+func TestWriter_DiscoveryInstrumentShape(t *testing.T) {
+	// Verifies the on-disk YAML uses OBI v0.9's selector key
+	// (`discovery.instrument`, not `services`) and emits open_ports as
+	// a string scalar — not a YAML list of ints. OBI silently ignores
+	// entries under the wrong key, which is painful to debug.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	w, _ := obiconfig.NewWriter(path)
+
+	f := obiconfig.DefaultFile("http://127.0.0.1:4318")
+	f.Discovery.Instrument = []obiconfig.Instrument{{
+		Name:      "smoke",
+		OpenPorts: "80,8080",
+	}}
+	if _, err := w.Write(f); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "instrument:") {
+		t.Errorf("expected `instrument:` selector key; got:\n%s", content)
+	}
+	if strings.Contains(content, "services:") {
+		t.Errorf("did not expect legacy `services:` key; got:\n%s", content)
+	}
+	if !strings.Contains(content, "open_ports: 80,8080") {
+		t.Errorf("expected `open_ports: 80,8080` as string scalar; got:\n%s", content)
 	}
 }
 

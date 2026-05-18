@@ -46,6 +46,16 @@ func NewPromMeterProvider() (*sdkmetric.MeterProvider, http.Handler, error) {
 		// docs/design/roadmap.md §7).
 		otelprom.WithoutCounterSuffixes(),
 		otelprom.WithoutUnits(),
+		// Disable the SDK's auto-generated target_info / scope_info.
+		// OBI emits its own target_info per discovered workload (with
+		// the workload's K8s/cloud Resource attrs and empty help). The
+		// forwarder filters OBI's copies, but we also drop ours so
+		// there is only ever one possible source of target_info in
+		// the registry — eliminates the help-text collision class
+		// of bug entirely. The agent's identity is still scrapable
+		// via ollie_agent_up.
+		otelprom.WithoutTargetInfo(),
+		otelprom.WithoutScopeInfo(),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("capture: prometheus exporter: %w", err)

@@ -136,6 +136,60 @@ func TestAllowPID_Coalescing(t *testing.T) {
 	}
 }
 
+func TestInitialOpenPorts_SeedsDiscoveryAtStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	mgr, err := capture.NewBridge(capture.Config{
+		ObiConfigPath:    path,
+		OBIEndpoint:      "http://127.0.0.1:4318",
+		InitialOpenPorts: "80,8080",
+	})
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	content := readConfigSettling(t, path, "open_ports: 80,8080", 2*time.Second)
+	if !strings.Contains(content, "instrument:") {
+		t.Errorf("expected `instrument:` selector key; got:\n%s", content)
+	}
+	if !strings.Contains(content, "name: smoke") {
+		t.Errorf("expected synthetic `name: smoke` entry; got:\n%s", content)
+	}
+}
+
+func TestInitialOpenPorts_DisplacedByAllowPID(t *testing.T) {
+	// Once any AllowPID arrives, per-PID Instrument entries take
+	// over and the smoke seed disappears.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obi.yaml")
+	mgr, err := capture.NewBridge(capture.Config{
+		ObiConfigPath:    path,
+		OBIEndpoint:      "http://127.0.0.1:4318",
+		InitialOpenPorts: "80",
+	})
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	_ = readConfigSettling(t, path, "name: smoke", 2*time.Second)
+	_ = mgr.AllowPID(2024, capture.PIDSpec{})
+	content := readConfigSettling(t, path, "target_pids:", 3*time.Second)
+	if strings.Contains(content, "name: smoke") {
+		t.Errorf("AllowPID should replace the smoke seed; still present in:\n%s", content)
+	}
+	if !strings.Contains(content, "2024") {
+		t.Errorf("expected PID 2024 in target_pids; got:\n%s", content)
+	}
+}
+
 func TestAllowPID_IdempotentDoesNotRewrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "obi.yaml")
