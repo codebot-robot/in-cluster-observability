@@ -147,4 +147,3 @@ func TestTranslateMetrics_EmptyInput(t *testing.T) {
 		t.Errorf("nil input should produce no events; got %d", len(got))
 	}
 }
-
