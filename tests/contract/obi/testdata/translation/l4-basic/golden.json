@@ -7,7 +7,8 @@
       "value": 4096,
       "attributes": {
         "custom.tag": "kept",
-        "peer.address": "10.0.0.5"
+        "peer.address": "10.0.0.5",
+        "service.namespace": "shop"
       }
     }
   },
@@ -19,7 +20,8 @@
       "value": 2048,
       "attributes": {
         "custom.tag": "kept",
-        "peer.address": "10.0.0.5"
+        "peer.address": "10.0.0.5",
+        "service.namespace": "shop"
       }
     }
   }
