@@ -24,22 +24,22 @@ import (
 
 // TranslateMetrics walks an OTLP ResourceMetrics tree and emits a
 // capture.Event per datapoint. Resource attributes are merged into
-// each event's Attributes map; OBI's k8s.* attrs are stripped per
-// ADR-0017.4 (we re-attribute via pkg/topology in v0.3).
+// each event's Attributes map. Per ADR-0021 OBI is the source of K8s
+// identity; the k8s.* / service.* attrs OBI attaches flow through
+// unchanged so re-emitted Prometheus metrics carry them.
 //
-// Per ADR-0017.5, v0.2 carries the minimal field set: name + value +
-// (peer + direction) attrs. Names are passed through unchanged;
-// renaming to the canonical ollie_* prefix happens later.
+// Names are passed through unchanged (no `ollie_*` rewrite — also
+// per ADR-0021).
 func TranslateMetrics(rms []*metricspb.ResourceMetrics) []Event {
 	var out []Event
 	now := time.Now()
 	for _, rm := range rms {
-		resAttrs := stripK8sAttrs(kvToMap(rm.GetResource().GetAttributes()))
+		resAttrs := kvToMap(rm.GetResource().GetAttributes())
 		for _, sm := range rm.GetScopeMetrics() {
 			for _, m := range sm.GetMetrics() {
 				module := classifyMetric(m.GetName())
 				for _, dp := range datapointsOf(m) {
-					attrs := mergeMaps(resAttrs, stripK8sAttrs(kvToMap(dp.attrs)))
+					attrs := mergeMaps(resAttrs, kvToMap(dp.attrs))
 					out = append(out, Event{
 						Kind:      EventMetric,
 						Timestamp: now,

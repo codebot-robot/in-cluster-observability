@@ -247,15 +247,16 @@ type Event struct {
 // Stability: Experimental
 type MetricEvent struct {
 	// Name is the metric name as emitted by OBI (e.g. tcp.rx.bytes).
-	// The translator does not rename here; renaming to the canonical
-	// ollie_* prefix happens in pkg/schema-driven enrichment in v0.3.
+	// Per ADR-0021 the translator passes names through unchanged; no
+	// `ollie_*` prefix rewrite.
 	Name string
 	// Value is the datapoint's value at the report time (counters
 	// arrive as deltas / sums per OBI's aggregation; this field carries
 	// the raw value reported).
 	Value float64
-	// Attributes is the merged set of resource + datapoint attributes,
-	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	// Attributes is the merged set of resource + datapoint attributes.
+	// Per ADR-0021 OBI is the source of K8s identity, so k8s.* /
+	// service.* attrs flow through unchanged for downstream re-emission.
 	Attributes map[string]string
 }
 
@@ -278,8 +279,8 @@ type SpanEvent struct {
 	StatusCode int
 	// DurationNs is the span duration in nanoseconds.
 	DurationNs uint64
-	// Attributes is the merged set of resource + span attributes,
-	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	// Attributes is the merged set of resource + span attributes.
+	// Per ADR-0021 OBI's k8s.* / service.* attrs flow through.
 	Attributes map[string]string
 }
 
