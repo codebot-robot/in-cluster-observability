@@ -32,6 +32,11 @@ type Server struct {
 	cppb.UnimplementedControlPlaneServer
 	Dispatcher *Dispatcher
 
+	// AgentState collects AgentStatus reports per pod UID, surfaced
+	// in CR status via the reconciler's WriteStatuses pass (Phase 3
+	// #93). Optional — nil means agent status feedback is dropped.
+	AgentState *AgentStateStore
+
 	// IsLeader is consulted on AgentSession entry. When false, the
 	// stream is rejected with FailedPrecondition so non-leader
 	// replicas don't accept agent traffic. Defaults to "always
@@ -101,12 +106,14 @@ func (s *Server) AgentSession(stream cppb.ControlPlane_AgentSessionServer) error
 			}
 			return err
 		}
-		// v0.4 ignores AgentHeartbeat / AgentStatus / AgentLocalDigest
-		// payloads — they're plumbed through but not yet consumed by
-		// the reconciler. Phase 3 (#92, #93) wires AgentStatus into
-		// CR status; AgentLocalDigest support lands when reconnect
-		// optimization becomes load-bearing.
-		_ = msg
+		// AgentStatus → AgentStateStore so the reconciler can
+		// surface activelyMonitoredPodCount + per-pod Ready
+		// condition (Phase 3 #93). Heartbeat / Digest are still
+		// plumbed-but-not-consumed; AgentLocalDigest support lands
+		// when reconnect-optimization becomes load-bearing.
+		if as := msg.GetStatus(); as != nil && s.AgentState != nil {
+			s.AgentState.Record(as.GetPodUid(), as.GetActive())
+		}
 		select {
 		case err := <-sendErr:
 			return err
