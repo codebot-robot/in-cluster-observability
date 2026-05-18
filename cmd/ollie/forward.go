@@ -45,6 +45,16 @@ func newMetricForwarder(meter metric.Meter) *metricForwarder {
 }
 
 func (f *metricForwarder) Record(ctx context.Context, ev capture.MetricEvent) {
+	// OTel SDK meta-metrics describe a Resource/Scope and are emitted
+	// by the Prometheus exporter from the *agent's* MeterProvider
+	// Resource. Re-recording OBI's per-workload copies through our
+	// Meter would produce duplicate definitions (different help
+	// strings), which client_golang refuses to scrape — the whole
+	// /metrics endpoint returns an error in that case. Drop them.
+	switch ev.Name {
+	case "target_info", "otel_scope_info":
+		return
+	}
 	opts := metric.WithAttributes(attrsToOTel(ev.Attributes)...)
 	if looksCumulative(ev.Name) {
 		if c := f.counter(ev.Name); c != nil {
