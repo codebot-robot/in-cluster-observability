@@ -1,30 +1,38 @@
-# In-Cluster Observability
+# Ollie
 
-This project aims to provide lightweight, in-cluster observability for Kubernetes clusters. The primary goal is to explore whether a lightweight monitoring stack, running directly on Kubernetes nodes, can provide enough signal for effective autoscaling and traffic management.
+*Transparent eBPF network observability for Kubernetes workloads.*
 
-## Current State
+Ollie captures L4 and L7 traffic — TCP, HTTP/1.1, HTTP/2, gRPC, and TLS-decrypted L7 — without modifying the workloads themselves, attaches Kubernetes identity to every record, stores recent data in-cluster for low-latency queries (HPA, AI agents), and exports to pluggable long-term sinks via OTLP, Prometheus, or a registerable Go sink interface.
 
-The project is in an early "spike" phase. Currently, it includes:
-- A Go-based daemonset (conceptually) that gathers network interface metrics from `/proc/net/dev`.
-- A Prometheus metrics endpoint (`/metrics`) that exposes these metrics.
+The name plays on **o11y**, the standard observability abbreviation.
 
-## Getting Started
+## Status
 
-To run the agent locally (on Linux):
+This repository is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the repo root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) has been removed; it remains on `main` and is reachable via `git log main`.
 
-```bash
-go run main.go
-```
+Active development lives on the `rewrite` branch. The **v0.1 Foundation** milestone has landed (scaffolding, public API skeletons, OBI adapter shell, container image, minimal DaemonSet) — the agent deploys but does nothing observable yet. Real eBPF capture lands with v0.2; HPA-ready custom metrics with v0.5; production-ready v1.0 follows.
 
-Then you can access the metrics at `http://localhost:8080/metrics`.
+Milestones are tracked at [github.com/gke-labs/in-cluster-observability/milestones](https://github.com/gke-labs/in-cluster-observability/milestones).
 
-## Contributing
+## Where to read what
 
-This project is licensed under the [Apache 2.0 License](LICENSE).
+| You want to | Read |
+|---|---|
+| Understand what we're building | [`docs/requirements.md`](docs/requirements.md) |
+| Understand how we're building it | [`docs/design/architecture.md`](docs/design/architecture.md) |
+| Read the decision log | [`docs/design/decisions.md`](docs/design/decisions.md) |
+| Set up your environment / contribute | [`AGENTS.md`](AGENTS.md), then [`docs/contributing.md`](docs/contributing.md) |
+| Browse the roadmap | [`docs/design/roadmap.md`](docs/design/roadmap.md) |
 
-We welcome contributions! Please see [docs/contributing.md](docs/contributing.md) for more information.
+A polished user-facing README ships with v1.0 ([issue #113](https://github.com/gke-labs/in-cluster-observability/issues/113)). This version is the in-flight pointer.
 
-We follow [Google's Open Source Community Guidelines](https://opensource.google.com/conduct/).
+## Module path
+
+The Go module path remains `github.com/gke-labs/in-cluster-observability` — the repository name. Within the project, binary, image, namespace, and metric prefix are all `ollie`.
+
+## License
+
+Apache 2.0 — see [`LICENSE`](LICENSE).
 
 ## Disclaimer
 

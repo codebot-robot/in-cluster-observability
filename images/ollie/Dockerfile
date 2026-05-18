@@ -12,4 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-version: latest
+# Two-stage build: golang builder -> distroless static.
+# CGO disabled per repo convention; binary is fully static so the
+# final image needs no libc.
+
+ARG VERSION=v0.1.0-dev
+
+FROM golang:1.25 AS builder
+ARG VERSION
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/ollie \
+    ./cmd/ollie
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/ollie /ollie
+USER 65532:65532
+ENTRYPOINT ["/ollie"]

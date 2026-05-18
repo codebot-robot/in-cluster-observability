@@ -1,0 +1,368 @@
+# Data Plane (Agent)
+
+**Status:** Draft, 2026-05-17
+**Owners:** TBD
+
+This document specifies the per-node agent: the DaemonSet pod that runs eBPF capture, enriches each event with Kubernetes identity, writes to the local in-cluster store, and feeds registered sinks. It satisfies requirements §2.1 (Capture) and §2.5 (Standard derived metrics) and implements [ADR-0006](decisions.md#adr-0006-kerneldistro-target--cos-125-kernel-6x-btfco-re-required).
+
+The agent's job is **deterministic and tight**: events come out of OBI, they get enriched, they get written. Everything else (CRD watching, identity broadcasting, cross-node aggregation) is the controller's or query server's job.
+
+## 1. Process structure
+
+```mermaid
+flowchart LR
+    obi["OBI (via pkg/capture)"] --> events
+    events["events chan"] --> enricher
+    enricher["Enricher<br/>(K8s identity,<br/>templating,<br/>sampling)"] --> writer
+    writer["Writer<br/>(batch, dispatch)"] --> store["Store (tsdb + ring)"]
+    writer --> pushSinks["PushSinks<br/>(per-batch)"]
+    writer --> selfObs["Self-observability<br/>counters"]
+    ctrl["Controller stream<br/>(MonitoringSpec, Identity)"] --> specMgr["Spec Manager"]
+    specMgr --> obi
+    specMgr --> enricher
+```
+
+The hot path is **OBI → events → enricher → writer**. It runs in a small number of goroutines (one per OBI tracer, one enricher pool, one writer per sink dispatch goroutine pool) and never crosses a network boundary on a per-event basis. Everything is in-process.
+
+The control path (`Controller stream → Spec Manager → OBI`) is asynchronous and bursty; it does not gate the hot path.
+
+## 2. Subsystems
+
+### 2.1 Capture (`pkg/capture`)
+
+The OBI adapter. Details in [`obi-integration.md`](obi-integration.md). The agent uses it via:
+
+```go
+mgr, err := capture.New(capture.Config{
+    Logger:      log,
+    KubeletAddr: "https://127.0.0.1:10250",
+})
+if err != nil { /* fatal */ }
+mgr.EnableModule(capture.ModuleL4TCP, capture.ModuleConfig{})
+// HTTP/gRPC/TLS modules enabled when first MonitoringSpec requires them.
+
+go func() {
+    for ev := range mgr.Events() {
+        enricher.Process(ev)
+    }
+}()
+```
+
+### 2.2 Spec Manager (`internal/specmgr`)
+
+Receives `MonitoringSpecDelta` messages from the controller stream ([`control-plane.md`](control-plane.md) §4) and translates them into capture and enricher state.
+
+Responsibilities:
+- Resolve `spec.PodUID` → local PIDs (via the Kubelet `/pods` cache + `/proc/<pid>/cgroup`); see [`topology.md`](topology.md).
+- For each resolved PID, call `capture.AllowPID(pid, …)` with the spec's protocol set.
+- For each pod no longer covered, call `capture.BlockPID(pid)`.
+- Compile cardinality knobs (templating regexes, sampling rates) and hand the compiled forms to the enricher.
+- Maintain a `pod_uid → MonitoringSpec` map for the enricher to consult on each event.
+
+Idempotent. Re-application of the same spec is a no-op (Generation-gated).
+
+### 2.3 Enricher (`internal/enricher`)
+
+Per-event enrichment. Single function on the hot path:
+
+```go
+type Enricher struct {
+    pidIndex      *pidcache.Cache         // PID → Pod identity (topology pkg)
+    peerResolver  *topology.PeerResolver  // IP → Identity
+    specsByPodUID map[types.UID]*MonitoringSpec
+    rules         atomic.Pointer[ruleSet] // compiled templating + sampling
+    hooks         []capture.Enricher      // user-registered hooks
+    metrics       *enricherMetrics
+}
+
+func (e *Enricher) Process(ev capture.Event) {
+    src := e.pidIndex.LookupByPID(ev.PID)
+    spec, ok := e.specsByPodUID[src.PodUID]
+    if !ok {
+        e.metrics.UnmatchedDrop.Inc()
+        return
+    }
+
+    // 1. Source identity (k8s.*)
+    applyIdentity(&ev, src)
+
+    // 2. Peer identity (peer.k8s.* / peer_external)
+    if peer := e.peerResolver.Lookup(ev.PeerIP); peer != nil {
+        applyPeerIdentity(&ev, peer)
+    } else {
+        ev.Attrs["peer_external"] = "true"
+        ev.Attrs["peer_ip"] = ev.PeerIP.String()  // bounded by spec.cardinality
+    }
+
+    // 3. Templating
+    if r := e.rules.Load(); r != nil {
+        r.ApplyTemplating(&ev, spec)
+    }
+
+    // 4. Sampling
+    if !r.SampleDecision(&ev, spec) {
+        e.metrics.SamplingDrop.Inc()
+        return
+    }
+
+    // 5. User hooks
+    for _, h := range e.hooks {
+        h(ctx, &ev)
+    }
+
+    // 6. Hand to writer.
+    writer.Submit(ev)
+}
+```
+
+The whole function is allocation-bounded (one `Event` per call, attributes are a small map with capacity hints). Profiling targets per call: ≤500 ns at 10k events/s/agent steady state.
+
+### 2.4 Writer (`internal/writer`)
+
+Batches events by destination and dispatches to the store and push sinks. Architecturally simple:
+
+```go
+type Writer struct {
+    store      *store.Store
+    sinks      *sink.Registry
+    batchTicker *time.Ticker  // default 1s
+    batch       batchBuf
+    mu          sync.Mutex
+    metrics    *writerMetrics
+}
+
+func (w *Writer) Submit(ev capture.Event) {
+    w.mu.Lock()
+    w.batch.add(ev)
+    w.mu.Unlock()
+}
+
+// On tick (or on batch full):
+//   1. swap batch out, unlock
+//   2. write metrics to tsdb (via store.Appender — batch-fsynced WAL)
+//   3. write spans/edges to ring buffers
+//   4. construct a sink.Batch and dispatch to every PushSink in parallel
+//      (per-sink bounded buffer; see sinks-and-extensibility.md §4)
+```
+
+Sink dispatch happens in dedicated goroutines per sink so a slow sink doesn't gate others.
+
+### 2.5 Topology client (`pkg/topology`)
+
+Maintains two caches:
+- **Local PID cache.** Built from Kubelet `/pods` + `/proc/<pid>/cgroup`. Watched for K8s pod-update events (via the controller stream's identity broadcast, scoped to this node).
+- **Peer identity cache.** Populated by `IdentitySnapshot` and `IdentityDelta` messages from the controller. Has a local fallback informer activated per [ADR-0009](decisions.md#adr-0009-informer-custody--hybrid).
+
+Details in [`topology.md`](topology.md).
+
+### 2.6 Self-observability surface
+
+Every component on this list exposes its own Prometheus metrics; the agent runs a `/metrics` listener on `:9090` (separate from the OTLP receive port). Names prefixed `ollie_agent_*`. The full list is in [`operations.md`](operations.md) §6.
+
+Tracing: the agent uses the `obs` package idiom from the existing repo (`ctx, span := obs.Start(ctx, "name", obs.String(...))`). All major operations (spec apply, enrichment, batch write, sink dispatch) are spans; spans are sampled (default 1%) and exported via OTLP to a configurable collector.
+
+## 3. Per-pod config flow
+
+End-to-end: user creates `TrafficMonitor` → enabled module set reaches the kernel.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User
+    participant API as kube-apiserver
+    participant Ctrl as Controller
+    participant Agent
+    participant Cap as capture (OBI adapter)
+    participant Kernel
+
+    User->>API: kubectl apply TrafficMonitor
+    API->>Ctrl: Watch event
+    Ctrl->>Ctrl: Resolve selector → matched Pods
+    Ctrl->>Ctrl: Compute MonitoringSpec per pod
+    Ctrl-->>Agent: MonitoringSpecDelta UPSERT (over gRPC stream)
+    Agent->>Agent: SpecMgr resolves PodUID → PIDs (via Kubelet cache)
+    Agent->>Cap: AllowPID(pid, {protocols, sampling, …})
+    Cap->>Cap: EnableModule(ModuleHTTP1) if not already
+    Cap->>Kernel: attach uprobe / kprobe / tracepoint
+    Kernel-->>Cap: events on ring buffer
+    Cap-->>Agent: capture.Event on Events() chan
+    Agent->>Agent: enricher.Process → writer.Submit
+    Agent-->>Ctrl: AgentStatus (active_pids=N) on next heartbeat
+```
+
+Latency target: end-to-end CR-create → first event captured ≤ 5 seconds in a healthy cluster.
+
+## 4. Protocol coverage matrix
+
+Per [`obi-integration.md`](obi-integration.md) §5, the agent exposes the OBI-supported modules. Coverage for v1 release:
+
+| Capability | v1 release | Source |
+|---|---|---|
+| L4 TCP bytes/conns/rtt/retransmits | ✅ | OBI L4 |
+| L4 timing signals (time-to-first-byte) as latency proxy | ✅ | OBI L4 |
+| HTTP/1.1 requests + latencies | ✅ | OBI HTTP |
+| HTTP/2 requests + latencies | ✅ | OBI HTTP |
+| gRPC requests + latencies + status codes | ✅ | OBI gRPC |
+| A2A (captured as HTTP) | ✅ | OBI HTTP; semantic layer roadmap |
+| TLS — Go `crypto/tls` | ✅ | OBI uprobes |
+| TLS — OpenSSL | ✅ | OBI uprobes |
+| TLS — BoringSSL | ⚠️ limited | OBI partial |
+| TLS — rustls, NSS, Java JSSE | ❌ roadmap | See [`roadmap.md`](roadmap.md) |
+| Kafka | ❌ roadmap | OBI pending |
+| SQL (PostgreSQL/MySQL/MongoDB/Redis) | optional | OBI; not default-enabled in `ClusterTrafficPolicy` |
+| GenAI (OpenAI/Anthropic/Gemini) | ✅ | OBI; enables "AI agents calling AI agents" observability |
+
+### 4.1 Per-request and per-response latency
+
+Required by user feedback. Implementation:
+
+- **L7 request latency** = time from request bytes seen to response bytes seen, per OBI's HTTP/gRPC instrumentation. Already produced as part of the `*_request_duration_seconds` histogram.
+- **L7 response latency** = time from server start-of-response to end-of-response. Surfaced as a separate `*_response_duration_seconds` histogram (less commonly used; configurable to disable for cardinality).
+- **L4 "request/response" timing proxies** = inter-byte timings on the same TCP connection. Not true L7 latency; surfaced as `ollie_tcp_response_first_byte_seconds` histogram with a clear name and documented caveats.
+
+These three are visible to HPA and dashboards without any client work.
+
+## 5. Resource budgets
+
+Per requirement-derived targets. Each is enforced by `tests/bench/` (see [`testing-and-benchmarks.md`](testing-and-benchmarks.md)).
+
+| Budget | Steady-state target | Stress ceiling | Verification |
+|---|---|---|---|
+| Agent CPU | ≤ 5% of 1 vCPU per node | ≤ 15% | Bench harness — canary @ 5k req/s/node |
+| Agent RSS | ≤ 200 MB | ≤ 400 MB | Bench harness — 50k active series |
+| Disk WAL bytes | ≤ 200 MB | ≤ 600 MB | Bench harness — 1h continuous |
+| Network egress (agent → controller heartbeats + status) | ≤ 1 KB/s | ≤ 10 KB/s | Bench harness — measured |
+| Per-event enrichment | ≤ 500 ns | ≤ 5 µs | Go benchmark in `internal/enricher` |
+| End-to-end event latency (kernel → store) | ≤ 5 ms p99 | ≤ 50 ms p99 | E2E bench |
+| Sink dispatch latency (per batch, per sink) | ≤ 100 ms p99 | n/a | E2E bench |
+
+These are hard regression gates. CI fails on regression.
+
+## 6. Failure isolation
+
+The agent runs on every node and must not destabilize the node. Defenses:
+
+| Failure | Containment |
+|---|---|
+| OBI panic | Adapter recovers; module marked degraded; agent continues. See [`obi-integration.md`](obi-integration.md) §2 |
+| Bad MonitoringSpec | SpecMgr rejects (validation in agent); rejection reported in `AgentStatus`; agent continues with last-known-good spec |
+| Kubelet unreachable | Local PID cache stale; agent uses last cached state; new pods get an unattributed flow record for ~5s until Kubelet returns |
+| Controller stream down | Agent's last applied spec stays; identity cache stays (with TTL marked stale); local fallback informer activates after 3 missed heartbeats |
+| Store WAL full | Writes drop; counter ticks; store self-observability metric paged |
+| Sink misbehaves | Per-sink bounded buffer drops; counter ticks; agent unaffected. See [`sinks-and-extensibility.md`](sinks-and-extensibility.md) §4 |
+| Agent OOM | DaemonSet restarts; WAL replays HEAD; loss ≤ 30s of unfsynced metric writes |
+| Kernel verifier rejection on a uprobe | OBI returns error on EnableModule; agent reports and continues with other modules |
+| Excessive cardinality | Tsdb rejects samples that would exceed `MaxSamplesPerHEAD`; counter ticks; operator alarmed |
+
+The principle: **the agent is a guest on the node**. Kernel calls are wrapped, panics are recovered, networks are non-blocking. We accept signal-loss before we accept node-impact.
+
+## 7. Privileged operations
+
+Per [`operations.md`](operations.md) §3 (the canonical security doc):
+
+- `CAP_BPF` — eBPF program loading.
+- `CAP_PERFMON` — performance event access.
+- `CAP_NET_ADMIN` — required for some BPF program types.
+- `hostPID: true` — required to attach uprobes to PIDs in other pod namespaces.
+- Mount `/sys/fs/bpf` (rw — pinning) and `/proc` (ro) and `/sys/kernel/debug` (ro, for BTF).
+
+We **do not** require `CAP_SYS_ADMIN`. If any specific OBI feature insists on it, we either fork around it (per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter)) or document and gate the feature.
+
+## 8. Configuration
+
+Agent reads from `obsapi.Config` when used as a library, or from `--config` + flags + env when run as the default binary. All values have defaults; nothing required at minimum.
+
+```yaml
+# /etc/ollie/agent.yaml — defaults
+role: agent
+namespace: ollie-system
+
+store:
+  path: /var/lib/ollie
+  retention: 10m
+  ringCapSpans: 65536
+  ringCapEdges: 65536
+
+capture:
+  kubeletAddr: https://127.0.0.1:10250
+  eventBuffer: 4096
+
+controller:
+  endpoint: ollie-controller.ollie-system.svc:9443
+  heartbeatInterval: 5s
+  fallbackInformerAfterMissed: 3
+
+selfObservability:
+  metricsAddr: :9090
+  tracesEndpoint: ""   # OTLP collector for our own tracing; empty disables
+  tracesSampling: 0.01
+
+sinks:
+  # Inline configs for built-in sinks. See sinks-and-extensibility.md §8.
+  otlp:
+    endpoint: ""       # disabled by default
+  promscrape: {}       # /metrics on metricsAddr above
+```
+
+## 9. Deployment manifest summary
+
+(Full YAML lives in `k8s/`.)
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: { name: ollie-agent, namespace: ollie-system }
+spec:
+  selector: { matchLabels: { app: ollie-agent } }
+  template:
+    metadata: { labels: { app: ollie-agent } }
+    spec:
+      hostPID: true
+      serviceAccountName: ollie-agent
+      containers:
+        - name: agent
+          image: ollie   # bare image name; ap adds registry prefix
+          args: [--role=agent, --config=/etc/ollie/agent.yaml]
+          securityContext:
+            capabilities:
+              add: [BPF, PERFMON, NET_ADMIN]
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+          ports:
+            - { containerPort: 9090, name: metrics }
+          volumeMounts:
+            - { name: bpf,    mountPath: /sys/fs/bpf }
+            - { name: proc,   mountPath: /proc,                   readOnly: true }
+            - { name: btf,    mountPath: /sys/kernel/debug,       readOnly: true }
+            - { name: store,  mountPath: /var/lib/ollie }
+            - { name: config, mountPath: /etc/ollie,      readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 200Mi }
+            limits:   { cpu: 500m, memory: 400Mi }
+          readinessProbe:
+            httpGet: { path: /healthz/ready, port: metrics }
+          livenessProbe:
+            httpGet: { path: /healthz/live,  port: metrics }
+      volumes:
+        - { name: bpf,    hostPath: { path: /sys/fs/bpf, type: Directory } }
+        - { name: proc,   hostPath: { path: /proc,       type: Directory } }
+        - { name: btf,    hostPath: { path: /sys/kernel/debug, type: Directory } }
+        - { name: store,  hostPath: { path: /var/lib/ollie, type: DirectoryOrCreate } }
+        - { name: config, configMap: { name: ollie-agent-config } }
+```
+
+## 10. Generated artifacts
+
+Per repo convention ([AGENTS.md](../../AGENTS.md)):
+
+- Any `.bpf.c` we add lives in `internal/bpf/` and is generated via `bpf2go` with the existing `cilium/ebpf` toolchain. We expect to add **very little** — OBI ships its own.
+- gRPC stubs for the controller↔agent stream live in `pkg/controller/pb/`, generated from `proto/controlplane/v1/*.proto` via `ap generate`.
+
+All generated files are checked in and verified by `ap-verify-generate`.
+
+## Open questions
+
+1. **Per-PID vs per-cgroup attach.** OBI is PID-based today. cgroup-based filtering would survive pod restarts more gracefully; OBI may move that way. Adapter today exposes PID-based; will revisit on OBI evolution.
+2. **eBPF-side sampling.** Some sampling can be done in the eBPF program (zero overhead for dropped events). OBI's surface for this is evolving; we expose `Sampling.headBased.rate` and let the adapter prefer eBPF-side when available.
+3. **Whether to expose `pkg/sink` registration at the agent level.** Today the agent uses the central `sink.Registry`. An embedder running `RoleAgent` might want per-spec sink overrides; today this is `MonitoringSpec.ExtraSinks` referencing names. Adequate for v1.
+4. **Hot-reload of agent config.** Currently SIGHUP triggers reload of `agent.yaml`. Should the controller push config changes too? Out of scope for v1; the controller pushes `MonitoringSpec`, not core agent config.
