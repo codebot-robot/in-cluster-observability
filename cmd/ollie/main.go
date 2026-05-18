@@ -45,7 +45,7 @@ import (
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
-var version = "v0.3.0-dev"
+var version = "v0.4.0-dev"
 
 func main() {
 	versionOnly := flag.Bool("version", false, "print version and exit")
@@ -56,6 +56,8 @@ func main() {
 	obiConfig := flag.String("obi-config", "/etc/ollie/obi-config/config.yaml", "shared-volume path where the agent writes OBI's config (empty disables writing)")
 	obiInstrumentPorts := flag.String("obi-instrument-ports", "", "seed OBI's discovery.instrument with one entry matching processes on these listening ports (OBI format: \"80\", \"80,8080\", \"8000-8999\"). v0.3 L7 smoke-test knob; harmless once the v0.4 controller pushes per-PID MonitoringSpecs.")
 	scrapeAddr := flag.String("scrape-addr", "0.0.0.0:9090", "bind address for the production Prometheus scrape endpoint at /metrics (empty disables). Per ADR-0021 this is the single scrape URL — exposes both agent self-obs and re-emitted OBI metrics.")
+	controllerAddr := flag.String("controller-addr", "", "gRPC target for the v0.4 ollie-controller (e.g. ollie-controller.ollie-system.svc:9102). Empty disables the controller client; agent runs in standalone v0.3 mode (--obi-instrument-ports seed).")
+	nodeName := flag.String("node-name", os.Getenv("KUBE_NODE_NAME"), "K8s node this agent runs on. Defaults to $KUBE_NODE_NAME (populated via Downward API in k8s/daemonset.yaml).")
 	debugEnable := flag.Bool("debug-endpoint", false, "enable the loopback debug HTTP endpoint on 127.0.0.1:9099 (off by default per ADR-0017.3)")
 	debugAddr := flag.String("debug-endpoint-addr", debugendpoint.DefaultAddr, "loopback bind address for the debug endpoint")
 
@@ -182,6 +184,24 @@ func main() {
 			}
 		}
 	}()
+
+	// v0.4 controller client. Opt-in via --controller-addr. When
+	// set, the agent connects to the controller's gRPC AgentSession
+	// stream and applies received MonitoringSpec deltas via
+	// capture.Manager.AllowPID / BlockPID. When unset, the agent
+	// runs in standalone v0.3 mode (--obi-instrument-ports seed).
+	if *controllerAddr != "" {
+		if *nodeName == "" {
+			fmt.Fprintln(os.Stderr, "controller client requires --node-name (or $KUBE_NODE_NAME); aborting")
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "controller client: connecting to %s as node=%s\n", *controllerAddr, *nodeName)
+		go runControllerClient(ctx, *controllerAddr, *nodeName, mgr, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		})
+	} else {
+		fmt.Fprintln(os.Stderr, "controller client: disabled (--controller-addr empty); standalone v0.3 mode")
+	}
 
 	<-ctx.Done()
 	fmt.Fprintln(os.Stderr, "received shutdown signal; draining")
