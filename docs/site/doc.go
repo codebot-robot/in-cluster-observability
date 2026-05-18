@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package site is the Hugo + Docsy documentation site for
-// in-cluster-observability. The actual content lives under
-// content/; this file exists only so that `go test ./...` (run
-// by `ap test`) finds at least one Go package in the module —
-// otherwise it errors with "matched no packages" because the
-// only go.mod here is the Hugo module wrapper.
+// Package site is the Hugo + Docsy documentation site for Ollie.
+// The actual content lives under content/; this file exists only so
+// that `go test ./...` (run by `ap test`) finds at least one Go
+// package in the module — otherwise it errors with "matched no
+// packages" because the only go.mod here is the Hugo module wrapper.
 package site

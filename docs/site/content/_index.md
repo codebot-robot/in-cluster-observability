@@ -1,11 +1,15 @@
 ---
-title: in-cluster-observability
+title: Ollie
 ---
 
-{{< blocks/cover title="in-cluster-observability" image_anchor="top" height="med" >}}
+{{< blocks/cover title="Ollie" image_anchor="top" height="med" >}}
 
 <p class="lead mt-5">
 Transparent, eBPF-based network observability for Kubernetes workloads. Zero instrumentation — your apps don't change. L4 TCP + L7 HTTP metrics and spans with full K8s identity attached automatically, scrapable by Prometheus on every node.
+</p>
+
+<p class="mt-2 small">
+(The name plays on <em>o11y</em>, the standard observability abbreviation. Repository: <a href="https://github.com/gke-labs/in-cluster-observability">gke-labs/in-cluster-observability</a>.)
 </p>
 
 <a class="btn btn-lg btn-primary me-3 mb-4" href="docs/getting-started/">Get started <i class="fa-solid fa-arrow-right ms-2"></i></a>
@@ -15,7 +19,7 @@ Transparent, eBPF-based network observability for Kubernetes workloads. Zero ins
 
 {{% blocks/lead color="primary" %}}
 
-`in-cluster-observability` is a "more flexible Pixie" — an eBPF-based agent that captures network traffic on every Kubernetes node and turns it into metrics, spans, and topology edges, attributed by K8s identity (pod, namespace, deployment, service). Built on top of [OpenTelemetry eBPF Instrumentation (OBI)](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation), it adds a thin agent that exposes everything on a single Prometheus scrape endpoint — with declarative CRD-driven onboarding, pluggable sinks, and an in-cluster store on the roadmap.
+**Ollie** is a "more flexible Pixie" — an eBPF-based agent that captures network traffic on every Kubernetes node and turns it into metrics, spans, and topology edges, attributed by K8s identity (pod, namespace, deployment, service). Built on top of [OpenTelemetry eBPF Instrumentation (OBI)](https://github.com/open-telemetry/opentelemetry-ebpf-instrumentation), it adds a thin agent that exposes everything on a single Prometheus scrape endpoint — with declarative CRD-driven onboarding, pluggable sinks, and an in-cluster store on the roadmap.
 
 **Status: v0.3 dev preview.** Capture pipeline works end-to-end on real clusters; CRD/controller, in-cluster store, custom-metrics API for HPA, and AI-agent streaming arrive in v0.4–v0.5. See [What works today]({{< relref "docs/what-works-today.md" >}}) for the honest current shape.
 
@@ -25,7 +29,7 @@ Transparent, eBPF-based network observability for Kubernetes workloads. Zero ins
 
 ## Should I try this today?
 
-`in-cluster-observability` is on a milestone cadence and v0.3 is the first release with anything user-observable end-to-end. Use this to self-select before you spend 10 minutes on the Kind walkthrough.
+Ollie is on a milestone cadence and v0.3 is the first release with anything user-observable end-to-end. Use this to self-select before you spend 10 minutes on the Kind walkthrough.
 
 ### Yes — try v0.3 today if …
 

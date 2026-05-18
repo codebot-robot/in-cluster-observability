@@ -2,7 +2,7 @@
 title: "Getting started"
 linkTitle: "Getting started"
 weight: 10
-description: "Deploy in-cluster-observability on a Kind cluster, attach to a real workload, and see per-pod L4 + L7 metrics with K8s identity in under 10 minutes."
+description: "Deploy Ollie on a Kind cluster, attach to a real workload, and see per-pod L4 + L7 metrics with K8s identity in under 10 minutes."
 ---
 
 This walks from a fresh clone to per-pod HTTP metrics on a real nginx Deployment, scraped from the agent's `:9090` endpoint with `k8s.pod.name` / `k8s.namespace.name` / `k8s.deployment.name` labels attached by OBI.

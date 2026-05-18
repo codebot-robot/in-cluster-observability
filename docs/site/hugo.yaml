@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Hugo configuration for the in-cluster-observability documentation
-# site.
+# Hugo configuration for the Ollie documentation site.
+# (Ollie is the project name; the repository lives at
+# gke-labs/in-cluster-observability — that path is unchanged.)
 #
 # Theme is Docsy (github.com/google/docsy) pulled in as a Hugo module
 # via go.mod. Docsy itself pulls Bootstrap + FontAwesome as Hugo
@@ -29,7 +30,7 @@
 # via .github/workflows/docs.yml.
 
 baseURL: "https://gke-labs.github.io/in-cluster-observability/"
-title: "in-cluster-observability"
+title: "Ollie"
 languageCode: "en-us"
 
 enableRobotsTXT: true
@@ -73,7 +74,7 @@ menu:
 
 params:
   copyright:
-    authors: "in-cluster-observability contributors"
+    authors: "Ollie contributors"
     from_year: 2026
 
   description: "Transparent eBPF-based network observability for Kubernetes workloads — zero-instrumentation L4/L7 metrics + spans with K8s identity, pluggable sinks, in-cluster query + HPA path."

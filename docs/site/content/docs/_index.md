@@ -7,7 +7,7 @@ menu:
     weight: 10
 ---
 
-You're in the `in-cluster-observability` reference docs. The site root has the project pitch; this section is the user-facing reference for the v0.3 dev preview.
+You're in the Ollie reference docs. The site root has the project pitch; this section is the user-facing reference for the v0.3 dev preview.
 
 ## Start here
 
