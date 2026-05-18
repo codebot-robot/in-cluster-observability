@@ -344,6 +344,12 @@ func (b *bridgeManager) buildConfig() obiconfig.File {
 
 	file := obiconfig.DefaultFile(b.cfg.OBIEndpoint)
 	if len(b.pids) == 0 {
+		if b.cfg.InitialOpenPorts != "" {
+			file.Discovery.Instrument = []obiconfig.Instrument{{
+				Name:      "smoke",
+				OpenPorts: b.cfg.InitialOpenPorts,
+			}}
+		}
 		return file
 	}
 	entries := make([]obiconfig.Instrument, 0, len(b.pids))

@@ -108,6 +108,18 @@ type Config struct {
 	// MeterProvider supplies the OTel meter used for self-observability
 	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
 	MeterProvider metric.MeterProvider
+
+	// InitialOpenPorts seeds OBI's discovery.instrument list with one
+	// synthetic "smoke" entry matching any process whose listening
+	// port is in this set. Format is OBI's native open_ports string:
+	// a single port ("80"), comma list ("80,8080"), or range
+	// ("8000-8999"). Only applied when no AllowPID-driven entries
+	// exist, so it is harmless once the v0.4 controller starts
+	// pushing per-PID MonitoringSpecs. Empty by default. Intended
+	// for v0.3 smoke tests of L7 capture before the controller
+	// exists — without it OBI's Application mode has nothing to
+	// attach to and stays silent.
+	InitialOpenPorts string
 }
 
 func (c *Config) applyDefaults() {
