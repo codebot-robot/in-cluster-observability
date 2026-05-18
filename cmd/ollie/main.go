@@ -37,6 +37,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/gke-labs/in-cluster-observability/internal/debugendpoint"
 	"github.com/gke-labs/in-cluster-observability/pkg/capture"
 )
@@ -83,6 +86,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "prometheus exporter init failed: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Always-on "agent is alive and scrape path is wired" signal.
+	// The OTel SDK only materializes a metric stream on first Add/
+	// Record, so a freshly-started agent with no traffic produces an
+	// empty /metrics aside from target_info. This gauge gives
+	// scrapers a non-empty signal from boot.
+	if up, err := mp.Meter("ollie/agent").Float64Gauge("ollie_agent_up",
+		metric.WithDescription("1 if the ollie agent is running and its scrape path is wired"),
+	); err == nil {
+		up.Record(ctx, 1, metric.WithAttributes(
+			attribute.String("version", version),
+		))
+	}
+
 	captureCfg := capture.Config{
 		OTLPGRPCAddr:     *otlpGRPC,
 		OTLPHTTPAddr:     *otlpHTTP,
