@@ -14,7 +14,8 @@ Milestone status:
 
 - **v0.1 Foundation** ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) landed: AP root, public package skeletons, OBI adapter shell, container image, minimal DaemonSet.
 - **v0.2 Capture MVP** ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) landed: OTLP receivers (gRPC + HTTP loopback), OBI config writer, AllowPID/BlockPID with reload coalescer, L4 TCP + HTTP/1.1 translation, OTel self-obs metrics, panic recovery + ModuleDegraded events, debug HTTP endpoint, contract-test harness. DaemonSet now has two containers (obi sibling + agent).
-- **v0.3 Storage MVP** is next.
+- **v0.3 (lean) — agent + OBI native enrichment** (per [ADR-0021](docs/design/decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment), supersedes the original v0.3 "Storage MVP" plan). Adds: OBI v0.9 schema fixes in `internal/obiconfig` (`discovery.instrument` + `open_ports` string + `target_pids`), `--obi-instrument-ports` smoke-test seed, OTel SDK Prometheus exporter always-on with a forwarder that re-records OBI's translated metrics, `--scrape-addr` agent listener at `:9090`, RBAC for OBI's K8s metadata informer, DaemonSet refactor (right caps + `OTEL_EBPF_CONFIG_PATH` env var + `/var/run/obi` + `/sys/fs/cgroup` mounts). What we explicitly did *not* build: a separate `internal/pidcache`, `internal/enricher`, `pkg/sink/promscrape`, or `pkg/store.MetricStore` — OBI's K8s informer + the OTel SDK + this single forwarder replace all of them.
+- **v0.4 Control Plane MVP** is next: CRDs (`TrafficMonitor` / `ClusterTrafficPolicy`), controller, gRPC stream pushing `MonitoringSpec` to agents, then the controller's `AllowPID` calls flow into the same OBI config writer the agent has today.
 
 What's in the repo:
 
@@ -23,11 +24,11 @@ What's in the repo:
 - `GEMINI.md` — stub pointing here
 - `.ap/` — autoproject config (`ap.yaml`, `headers.yaml`)
 - `go.mod` — single Go module
-- `cmd/ollie/` — default binary; v0.2 starts OTLP receivers + OBI config writer + optional debug endpoint
-- `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces), `obsapi`, `sink`, `topology`, `store`, `query`, `controller`, `schema`
+- `cmd/ollie/` — default binary; v0.3 starts OTLP receivers (loopback) + OBI config writer + Prometheus scrape on `:9090` + an OBI-metrics → OTel-SDK forwarder. Optional loopback debug endpoint at `:9099`.
+- `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces + NewPromMeterProvider), `obsapi`, `sink`, `topology`, `store` (interface stub; concrete span/edge store lands in v0.5), `query`, `controller`, `schema` (label-key + bucket constants)
 - `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `archtest` (enforces OBI import boundary)
 - `images/ollie/` — Dockerfile (distroless static, CGO disabled)
-- `k8s/` — install manifests (namespace + DaemonSet with `obi` + `agent` containers + kustomization)
+- `k8s/` — install manifests (namespace + RBAC + DaemonSet with `obi` + `agent` containers + kustomization)
 - `tests/contract/obi/` — OBI adapter contract tests + fixture harness
 - `dev/ci/presubmits/` — CI script wrappers
 - `.github/workflows/` — CI YAML
