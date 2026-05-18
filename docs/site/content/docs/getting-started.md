@@ -12,7 +12,7 @@ Kind is the reference cluster — the same flow works on any Linux 6.x cluster w
 ## Prerequisites
 
 - A clone of [`github.com/gke-labs/in-cluster-observability`](https://github.com/gke-labs/in-cluster-observability).
-- `docker`, `kubectl`, `kind`, `go` 1.25+.
+- `docker`, `kubectl`, `kind`, `go` 1.26+.
 - A kernel with BTF + CO-RE (any 5.10+ kernel built with `CONFIG_DEBUG_INFO_BTF=y`; Kind's default node image qualifies).
 
 ## 1. Spin up a Kind cluster
