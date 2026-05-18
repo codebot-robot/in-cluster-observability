@@ -18,4 +18,8 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - rbac.yaml
+  - controller-rbac.yaml
+  - crds/ollie.gke-labs.dev_trafficmonitors.yaml
+  - crds/ollie.gke-labs.dev_clustertrafficpolicies.yaml
+  - controller.yaml
   - daemonset.yaml
