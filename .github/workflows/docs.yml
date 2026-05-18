@@ -20,6 +20,15 @@ on:
     paths:
       - 'docs/site/**'
       - '.github/workflows/docs.yml'
+  # PRs run the build job only (no deploy) so broken Hugo / SCSS /
+  # Docsy module fetches get caught at the merge gate instead of
+  # in the post-merge production build. The deploy job's `if:`
+  # guard below scopes the actual Pages upload to push events.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/site/**'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 # Cancel superseded runs so we don't deploy a stale build over a fresh one.
@@ -93,6 +102,11 @@ jobs:
   deploy:
     name: deploy
     needs: build
+    # PR runs validate the build but must NOT publish to Pages —
+    # only push-to-main (and manual workflow_dispatch from main)
+    # promote to the live site. Without this guard, every PR
+    # build would overwrite the published site.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
