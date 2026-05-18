@@ -9,40 +9,61 @@ The agent's job is **deterministic and tight**: events come out of OBI, they get
 
 ## 1. Process structure
 
+Per [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), the agent runs as **one of two containers** in the DaemonSet pod. OBI runs in the sibling container, owns all kernel privileges, and emits OTLP to localhost. The agent container is unprivileged and looks like an OTLP receiver + storage + sink dispatcher.
+
 ```mermaid
 flowchart LR
-    obi["OBI (via pkg/capture)"] --> events
-    events["events chan"] --> enricher
-    enricher["Enricher<br/>(K8s identity,<br/>templating,<br/>sampling)"] --> writer
-    writer["Writer<br/>(batch, dispatch)"] --> store["Store (tsdb + ring)"]
-    writer --> pushSinks["PushSinks<br/>(per-batch)"]
-    writer --> selfObs["Self-observability<br/>counters"]
-    ctrl["Controller stream<br/>(MonitoringSpec, Identity)"] --> specMgr["Spec Manager"]
-    specMgr --> obi
+    subgraph obi_container["container: obi (privileged)"]
+        obi["OBI binary<br/>(eBPF capture)"]
+    end
+    subgraph agent_container["container: agent (unprivileged)"]
+        otlp["OTLP receiver<br/>(127.0.0.1:4317/:4318)"]
+        events["events chan"]
+        enricher["Enricher<br/>(K8s identity,<br/>templating,<br/>sampling)"]
+        writer["Writer<br/>(batch, dispatch)"]
+        store["Store (tsdb + ring)"]
+        pushSinks["PushSinks<br/>(per-batch)"]
+        selfObs["Self-observability<br/>counters"]
+        specMgr["Spec Manager<br/>(config writer)"]
+        ctrl["Controller stream<br/>(MonitoringSpec, Identity)"]
+    end
+
+    obi -- OTLP gRPC localhost --> otlp
+    otlp --> events
+    events --> enricher --> writer
+    writer --> store
+    writer --> pushSinks
+    writer --> selfObs
+    ctrl --> specMgr
+    specMgr -. write config file .-> obi
     specMgr --> enricher
 ```
 
-The hot path is **OBI → events → enricher → writer**. It runs in a small number of goroutines (one per OBI tracer, one enricher pool, one writer per sink dispatch goroutine pool) and never crosses a network boundary on a per-event basis. Everything is in-process.
+The hot path is **OBI (capture, OTLP emit) → loopback → OTLP receiver → enricher → writer**. The OTLP hop is local (loopback, no network), happens in batches per OBI's emit cadence (not per event), and runs in a small number of goroutines on the agent side.
 
-The control path (`Controller stream → Spec Manager → OBI`) is asynchronous and bursty; it does not gate the hot path.
+The control path (`Controller stream → Spec Manager → OBI config file → OBI reload`) is asynchronous and bursty. Spec Manager debounces reloads over a 500 ms window to avoid thrashing OBI during workload rollouts. The control path never gates the hot path.
 
 ## 2. Subsystems
 
 ### 2.1 Capture (`pkg/capture`)
 
-The OBI adapter. Details in [`obi-integration.md`](obi-integration.md). The agent uses it via:
+The OBI-bridge package. Hides the sibling-container details behind the `Manager` interface. Details in [`obi-integration.md`](obi-integration.md). The agent uses it via:
 
 ```go
 mgr, err := capture.New(capture.Config{
     Logger:      log,
-    KubeletAddr: "https://127.0.0.1:10250",
+    ObiConfigPath: "/etc/ollie/obi-config/config.yaml",  // shared volume
+    OTLPGRPCAddr:  "127.0.0.1:4317",
+    OTLPHTTPAddr:  "127.0.0.1:4318",
 })
 if err != nil { /* fatal */ }
 mgr.EnableModule(capture.ModuleL4TCP, capture.ModuleConfig{})
 // HTTP/gRPC/TLS modules enabled when first MonitoringSpec requires them.
+// Each EnableModule call updates the OBI config file and signals reload.
 
 go func() {
     for ev := range mgr.Events() {
+        // Events arrive from the OTLP receiver, translated to capture.Event
         enricher.Process(ev)
     }
 }()
@@ -54,12 +75,12 @@ Receives `MonitoringSpecDelta` messages from the controller stream ([`control-pl
 
 Responsibilities:
 - Resolve `spec.PodUID` → local PIDs (via the Kubelet `/pods` cache + `/proc/<pid>/cgroup`); see [`topology.md`](topology.md).
-- For each resolved PID, call `capture.AllowPID(pid, …)` with the spec's protocol set.
+- For each resolved PID, call `capture.AllowPID(pid, …)` with the spec's protocol set. The Manager rewrites OBI's discovery config and signals reload (per [`obi-integration.md`](obi-integration.md) §5).
 - For each pod no longer covered, call `capture.BlockPID(pid)`.
 - Compile cardinality knobs (templating regexes, sampling rates) and hand the compiled forms to the enricher.
 - Maintain a `pod_uid → MonitoringSpec` map for the enricher to consult on each event.
 
-Idempotent. Re-application of the same spec is a no-op (Generation-gated).
+Idempotent. Re-application of the same spec is a no-op (Generation-gated). Rapid changes are debounced before reaching OBI's config writer to avoid reload thrash.
 
 ### 2.3 Enricher (`internal/enricher`)
 
@@ -258,15 +279,17 @@ The principle: **the agent is a guest on the node**. Kernel calls are wrapped, p
 
 ## 7. Privileged operations
 
-Per [`operations.md`](operations.md) §3 (the canonical security doc):
+Per [`operations.md`](operations.md) §3 and [ADR-0018](decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), kernel privileges live **only on the sibling `obi` container**:
 
 - `CAP_BPF` — eBPF program loading.
 - `CAP_PERFMON` — performance event access.
 - `CAP_NET_ADMIN` — required for some BPF program types.
-- `hostPID: true` — required to attach uprobes to PIDs in other pod namespaces.
-- Mount `/sys/fs/bpf` (rw — pinning) and `/proc` (ro) and `/sys/kernel/debug` (ro, for BTF).
+- `hostPID: true` (set on the pod, shared with both containers but only used by OBI).
+- Mounts `/sys/fs/bpf` (rw — pinning), `/proc` (ro), `/sys/kernel/debug` (ro, for BTF).
 
-We **do not** require `CAP_SYS_ADMIN`. If any specific OBI feature insists on it, we either fork around it (per [ADR-0010](decisions.md#adr-0010-obi-version-pinning-and-adapter)) or document and gate the feature.
+The **`agent` container is unprivileged**: drops all capabilities, `runAsNonRoot: true`, `runAsUser: 65532`, `readOnlyRootFilesystem: true`. It mounts only the shared `emptyDir` for OBI's config file and the persistent volume for the store's WAL.
+
+Neither container requires `CAP_SYS_ADMIN`. If a specific OBI feature insists on it, that's an OBI image concern, not ours.
 
 ## 8. Configuration
 
@@ -317,38 +340,55 @@ spec:
   template:
     metadata: { labels: { app: ollie-agent } }
     spec:
-      hostPID: true
+      hostPID: true                # used by OBI only
       serviceAccountName: ollie-agent
       containers:
-        - name: agent
-          image: ollie   # bare image name; ap adds registry prefix
-          args: [--role=agent, --config=/etc/ollie/agent.yaml]
+        - name: obi                # privileged sibling — eBPF capture
+          image: ghcr.io/open-telemetry/obi:v0.9.0   # pinned via ADR-0010/0018
+          args: [--config, /etc/ollie/obi-config/config.yaml]
           securityContext:
             capabilities:
               add: [BPF, PERFMON, NET_ADMIN]
               drop: [ALL]
             readOnlyRootFilesystem: true
+            runAsUser: 0          # eBPF load needs uid 0 in the user namespace
+          volumeMounts:
+            - { name: bpf,        mountPath: /sys/fs/bpf }
+            - { name: proc,       mountPath: /proc,             readOnly: true }
+            - { name: btf,        mountPath: /sys/kernel/debug, readOnly: true }
+            - { name: obi-config, mountPath: /etc/ollie/obi-config }
+          resources:
+            requests: { cpu: 100m, memory: 150Mi }
+            limits:   { cpu: 500m, memory: 300Mi }
+        - name: agent              # unprivileged — OTLP receiver + store + sinks
+          image: ollie   # bare image name; ap adds registry prefix
+          args: [--role=agent, --config=/etc/ollie/agent.yaml]
+          securityContext:
+            capabilities: { drop: [ALL] }
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
           ports:
             - { containerPort: 9090, name: metrics }
           volumeMounts:
-            - { name: bpf,    mountPath: /sys/fs/bpf }
-            - { name: proc,   mountPath: /proc,                   readOnly: true }
-            - { name: btf,    mountPath: /sys/kernel/debug,       readOnly: true }
-            - { name: store,  mountPath: /var/lib/ollie }
-            - { name: config, mountPath: /etc/ollie,      readOnly: true }
+            - { name: obi-config, mountPath: /etc/ollie/obi-config }   # rw — agent writes
+            - { name: store,      mountPath: /var/lib/ollie }
+            - { name: config,     mountPath: /etc/ollie,                readOnly: true }
           resources:
-            requests: { cpu: 100m, memory: 200Mi }
-            limits:   { cpu: 500m, memory: 400Mi }
+            requests: { cpu: 50m,  memory: 100Mi }
+            limits:   { cpu: 300m, memory: 200Mi }
           readinessProbe:
             httpGet: { path: /healthz/ready, port: metrics }
           livenessProbe:
             httpGet: { path: /healthz/live,  port: metrics }
       volumes:
-        - { name: bpf,    hostPath: { path: /sys/fs/bpf, type: Directory } }
-        - { name: proc,   hostPath: { path: /proc,       type: Directory } }
-        - { name: btf,    hostPath: { path: /sys/kernel/debug, type: Directory } }
-        - { name: store,  hostPath: { path: /var/lib/ollie, type: DirectoryOrCreate } }
-        - { name: config, configMap: { name: ollie-agent-config } }
+        - { name: bpf,        hostPath: { path: /sys/fs/bpf,       type: Directory } }
+        - { name: proc,       hostPath: { path: /proc,             type: Directory } }
+        - { name: btf,        hostPath: { path: /sys/kernel/debug, type: Directory } }
+        - { name: store,      hostPath: { path: /var/lib/ollie,    type: DirectoryOrCreate } }
+        - { name: config,     configMap: { name: ollie-agent-config } }
+        - { name: obi-config, emptyDir: {} }    # shared between obi and agent
 ```
 
 ## 10. Generated artifacts

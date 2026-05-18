@@ -30,6 +30,8 @@ package capture
 import (
 	"context"
 	"time"
+
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Manager is the agent's handle on the eBPF capture pipeline. One
@@ -60,7 +62,7 @@ type Manager interface {
 
 	AddEnricher(Enricher)
 
-	Metrics() Metrics
+	Metrics() *Metrics
 }
 
 // Config governs construction. Fields are additive; embedders rely
@@ -69,18 +71,52 @@ type Manager interface {
 // Stability: Experimental
 type Config struct {
 	// KubeletAddr is the URL the agent uses to query the node-local
-	// Kubelet for the PID-to-Pod cache bootstrap. Defaults to
-	// "https://127.0.0.1:10250" when empty.
+	// Kubelet for the PID-to-Pod cache bootstrap (v0.3 / pkg/topology).
+	// Defaults to "https://127.0.0.1:10250" when empty.
 	KubeletAddr string
 	// ProcPath is the mount point of host /proc inside the agent
 	// container. Defaults to "/proc" when empty.
 	ProcPath string
-	// BpfFSPath is the bpffs mount point used for map pinning.
-	// Defaults to "/sys/fs/bpf" when empty.
+	// BpfFSPath is the bpffs mount point used for map pinning. Unused
+	// in the sibling-container model (OBI owns the bpffs mount); kept
+	// for forward compatibility.
 	BpfFSPath string
 	// EventBuffer sizes the Events() channel. Defaults to 4096 when
 	// zero or negative.
 	EventBuffer int
+
+	// --- Sibling-container fields (per ADR-0018) ---
+
+	// ObiConfigPath is the on-disk YAML file the agent writes for the
+	// sibling OBI container to consume. Empty disables the config
+	// writer (useful for tests). Default in production: shared volume
+	// at /etc/ollie/obi-config/config.yaml.
+	ObiConfigPath string
+	// OTLPGRPCAddr is the loopback bind address for the OTLP gRPC
+	// receiver. Empty disables the gRPC receiver. Must be loopback.
+	OTLPGRPCAddr string
+	// OTLPHTTPAddr is the loopback bind address for the OTLP HTTP
+	// receiver. Empty disables the HTTP receiver. Must be loopback.
+	OTLPHTTPAddr string
+	// OBIEndpoint is the URL the agent tells OBI to push OTLP to
+	// (written into ObiConfigPath). MUST include a scheme — OBI's
+	// HTTP exporter parses the value as a net/url URL and rejects
+	// bare host:port with "first path segment cannot contain colon".
+	// Defaults to "http://<OTLPHTTPAddr>" when empty (OBI defaults to
+	// the HTTP exporter, so we point at our HTTP listener).
+	OBIEndpoint string
+	// MeterProvider supplies the OTel meter used for self-observability
+	// metrics. Defaults to capture.DefaultMeterProvider() when nil.
+	MeterProvider metric.MeterProvider
+}
+
+func (c *Config) applyDefaults() {
+	if c.EventBuffer <= 0 {
+		c.EventBuffer = 4096
+	}
+	if c.OBIEndpoint == "" && c.OTLPHTTPAddr != "" {
+		c.OBIEndpoint = "http://" + c.OTLPHTTPAddr
+	}
 }
 
 // PIDSpec is what the controller's MonitoringSpec resolves to on a
@@ -192,17 +228,48 @@ type Event struct {
 	Edge   *EdgeEvent
 }
 
-// MetricEvent carries a single tsdb-bound sample. Field set lands with
-// the metric write path in v0.3.
+// MetricEvent carries a single translated metric datapoint from OBI.
+// Per ADR-0017.5, v0.2 carries the minimal field set; richer attributes
+// (e.g. k8s.* resource attrs after enrichment) land in v0.3.
 //
 // Stability: Experimental
-type MetricEvent struct{}
+type MetricEvent struct {
+	// Name is the metric name as emitted by OBI (e.g. tcp.rx.bytes).
+	// The translator does not rename here; renaming to the canonical
+	// ollie_* prefix happens in pkg/schema-driven enrichment in v0.3.
+	Name string
+	// Value is the datapoint's value at the report time (counters
+	// arrive as deltas / sums per OBI's aggregation; this field carries
+	// the raw value reported).
+	Value float64
+	// Attributes is the merged set of resource + datapoint attributes,
+	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	Attributes map[string]string
+}
 
-// SpanEvent carries a single OTel-shaped span. Field set lands with
-// the HTTP/gRPC tracers in v0.2.
+// SpanEvent carries a single translated OTel-shaped span from OBI's
+// L7 capture (HTTP/1.1 in v0.2). Per ADR-0017.5, field set is
+// minimal — full OTel span model (attribute soup + events + links)
+// arrives in v0.3.
 //
 // Stability: Experimental
-type SpanEvent struct{}
+type SpanEvent struct {
+	// Name is the span name as emitted by OBI (typically the OTel
+	// semconv form, e.g. "GET /users/{id}" or "GET").
+	Name string
+	// Method is the HTTP method (GET, POST, ...).
+	Method string
+	// Path is the raw, untemplated URL path. Templating arrives in
+	// v0.6 (#108).
+	Path string
+	// StatusCode is the HTTP response status (0 if unknown).
+	StatusCode int
+	// DurationNs is the span duration in nanoseconds.
+	DurationNs uint64
+	// Attributes is the merged set of resource + span attributes,
+	// minus OBI's k8s.* attrs (stripped per ADR-0017.4).
+	Attributes map[string]string
+}
 
 // EdgeEvent carries a single topology edge record. Field set lands
 // with the topology subsystem in v0.5.
@@ -216,8 +283,39 @@ type EdgeEvent struct{}
 // Stability: Experimental
 type Enricher func(ctx context.Context, ev *Event)
 
-// Metrics is the self-observability handle exposed by Manager. Concrete
-// counter types fill in alongside the metric impl in v0.2 (#76).
+// Metrics is the self-observability handle exposed by Manager. Counter
+// names use the canonical ollie_capture_* prefix per
+// docs/design/operations.md §5. Construct via NewMetrics; see metrics.go.
 //
 // Stability: Experimental
-type Metrics interface{}
+type Metrics struct {
+	// Meter is the OTel meter scoped to the capture subsystem.
+	// Embedders may create additional instruments off this if needed,
+	// but should prefer the named fields below for the standard set.
+	Meter metric.Meter
+
+	// EventsTotal counts every translated capture.Event emitted to the
+	// Events() channel. Attributes: module, kind.
+	EventsTotal metric.Int64Counter
+
+	// EventsDroppedTotal counts events that were not delivered.
+	// Attributes: reason (backpressure | translation_error | shutdown).
+	EventsDroppedTotal metric.Int64Counter
+
+	// ActivePIDs is the current count of PIDs in the AllowPID set.
+	// Up/down counter — adjusted on AllowPID / BlockPID.
+	ActivePIDs metric.Int64UpDownCounter
+
+	// ObiReloadsTotal counts OBI config-reload signals issued by the
+	// agent. Attributes: result (success | failure).
+	ObiReloadsTotal metric.Int64Counter
+
+	// ObiRestartsTotal counts observed restarts of the sibling OBI
+	// container, sourced from a container-status watcher (lands with
+	// #77). Zero in v0.2 until that watcher ships.
+	ObiRestartsTotal metric.Int64Counter
+
+	// PanicsTotal counts recovered panics on the agent side.
+	// Attributes: component (receiver | translator | writer | enricher).
+	PanicsTotal metric.Int64Counter
+}

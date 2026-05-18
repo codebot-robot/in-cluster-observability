@@ -188,7 +188,7 @@ The two languages serve disjoint data types; consumers pick the one matching wha
 
 ## ADR-0010: OBI version pinning and adapter
 
-**Status:** Accepted, 2026-05-17
+**Status:** Accepted, 2026-05-17 — adapter-shape clause superseded by [ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library); version-pinning principle stands but now applies to the OBI container image tag, not the Go module
 
 **Context.** OBI is v0.8 and explicitly says minor releases may break API and behavior. We depend on it for the deepest part of the stack. Direct dependency would make every OBI bump a project-wide refactor.
 
@@ -348,7 +348,7 @@ All path references in earlier ADRs and design docs are updated to drop the `cor
 
 ## ADR-0017: v0.2 Capture MVP implementation decisions
 
-**Status:** Accepted, 2026-05-17
+**Status:** Accepted, 2026-05-17 — sub-decisions 17.1, 17.4, 17.5 amended by [ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library) (OBI runs as a sibling container, not an embedded Go library); 17.2 and 17.3 stand
 
 **Context.** Five implementation-time decisions for v0.2 (Capture MVP, issues [#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) that aren't large enough to merit individual ADRs but should be captured before work begins. Filed as one ADR to keep the log tight; v0.2 implementation PRs reference this ADR for justification per sub-decision.
 
@@ -398,6 +398,127 @@ All path references in earlier ADRs and design docs are updated to drop the `cor
 ---
 
 **Implemented in.** v0.2 milestone work ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)). Each issue's PR references this ADR for the relevant sub-decision.
+
+---
+
+## ADR-0018: OBI as sibling container, not embedded library
+
+**Status:** Accepted, 2026-05-17 — supersedes [ADR-0010](#adr-0010-obi-version-pinning-and-adapter)'s adapter-shape clause; amends [ADR-0017](#adr-0017-v02-capture-mvp-implementation-decisions) sub-decisions 17.1, 17.4, 17.5
+
+**Context.** ADR-0010 assumed OBI's `pkg/ebpf` was suitable for embedded library use, anticipating a thin adapter (~600–800 LoC) wrapping its Go API. Probing OBI v0.9.0 at the start of v0.2 implementation revealed reality:
+
+- `pkg/ebpf.NewProcessTracer(tracerType, []Tracer, *obi.Config, imetrics.Reporter) *ProcessTracer` is a low-level building-block API. Embedders supply protocol-module `Tracer` implementations themselves (each `Tracer` is a ~15-method interface mixing `PIDsAccounter`, `KprobesTracer`, `GoProbes`, `UProbes`, `SocketFilters`, `SockMsgs`, `SockOps`, `Iters`, `Tracing`, instrumented-lib bookkeeping, offset registration, and event-context wiring) plus an `EBPFEventContext`, an `*obi.Config`, and a `msg.Queue[[]request.Span]` for output.
+- OBI's higher-level orchestrator (`pkg/appolly/instrumenter.go`) is undocumented and uses OBI-internal types.
+- OBI's README and supported deployment model is **as a standalone binary that emits OTLP**, not as a Go library to compose with.
+- The actual lift to wrap `pkg/ebpf` is multiple person-weeks per protocol with the adapter pinned to OBI's internal contracts — exactly the churn ADR-0010 sought to insulate against.
+
+**Decision.** Run OBI as a **sibling container** in the same agent DaemonSet pod. OBI emits OTLP to `127.0.0.1:4317`; our agent is an **OTLP receiver** that runs the enrichment, store, and sinks. The agent does **not** import OBI as a Go dependency.
+
+Deployment shape:
+
+| Container | Image | Privileges | Purpose |
+|---|---|---|---|
+| `obi` | `ghcr.io/open-telemetry/obi:<pinned-tag>` | `CAP_BPF` + `CAP_PERFMON` + `CAP_NET_ADMIN` + `hostPID` + host mounts | eBPF capture; emits OTLP to localhost |
+| `agent` | `ollie:<our-tag>` | **unprivileged**; `runAsNonRoot: true` | OTLP receiver → enricher → store → sinks; OBI config writer |
+
+Both containers share the pod network namespace (loopback for OTLP) and the pod lifecycle. OBI's config is mounted from a ConfigMap that the controller (v0.4) writes; on `MonitoringSpec` changes the controller updates the ConfigMap and either signals reload or relies on OBI's config watch.
+
+The `pkg/capture.Manager` interface from v0.1 stays — its implementation pivots from "Go API caller" to "OTLP receiver + OBI lifecycle controller (config writer + reload signaler)."
+
+**Consequences.**
+
+- ✅ Adapter complexity drops dramatically. No `Tracer` interface implementations; no wiring through OBI's internal API surface; no `EBPFEventContext` plumbing.
+- ✅ OBI version churn is decoupled from our build. Image-tag bump = test in CI, ship. No `pkg/capture` rewrites per OBI minor.
+- ✅ Security posture improves: only the OBI container runs privileged. The agent container has no `CAP_BPF`, no `hostPID`, no host mounts. The threat model in [`operations.md` §4](operations.md) simplifies meaningfully.
+- ✅ Aligns with how OBI is designed and supported by upstream. We consume the tool the way its maintainers intended.
+- ✅ Matches the broader OTel ecosystem pattern (Beyla-as-sidecar, OTel Collector composition, Jaeger agent).
+- ⚠️ Two images in the agent pod. Resource overhead is two processes instead of one; OBI's footprint is what it always was.
+- ⚠️ Custom protocol modules (e.g. A2A semantic layer, Kafka before OBI supports it) become **upstream contributions** rather than additions to our adapter. Less control, but better fit for the ecosystem and easier to maintain.
+- ⚠️ Per-PID enable/disable becomes **config-driven** (rewrite OBI's discovery config + signal reload), not direct API call. Slightly less crisp but operationally fine and matches OBI's own model.
+
+**Supersedes.** ADR-0010's "thin adapter wrapping OBI's library API" framing. ADR-0010's "one version pinned at a time, dedicated bump PRs with contract tests green" principle stands but applies to the OBI **image tag**, not the Go module.
+
+**Amends ADR-0017.**
+
+- **17.1 OBI version pin:** now pin the OBI **image tag** in our manifest/Helm values, not the Go module in `go.mod`. The Go module dep was probe-only and is removed.
+- **17.4 Strip OBI's K8s attribution:** now via OBI **configuration** (disable Kubernetes metadata decoration in OBI's config), not in our adapter.
+- **17.5 Minimal field set:** OBI emits OTLP. Our v0.2 work is OTLP→`capture.Event` translation — much simpler than the originally anticipated OBI-event→`Event` translation.
+
+**Sub-decisions 17.2 (OTel metrics SDK) and 17.3 (debug HTTP endpoint loopback-only) stand unchanged.**
+
+**Rejected alternatives.**
+
+- *Deep embed via `pkg/ebpf` directly.* Multi-week per protocol, fragile against OBI minor versions, no documented support path. Already costly at v0.2; intractable across v0.6's TLS coverage and v1.0's full protocol suite.
+- *Vendor OBI's internal pipeline (`pkg/appolly/instrumenter.go`).* Undocumented and OBI-internal. Would force us to track every internal change with no upstream guarantees.
+- *Switch eBPF library.* Forking Pixie PEM hits the same embed-vs-sibling dilemma with worse coupling. Bespoke `cilium/ebpf` is a multi-year reinvention of what OBI already does. No clearly better alternative for our requirements.
+
+**Implementation impact on v0.2.** Issues [#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77) stay valid but their implementations pivot:
+
+- **#70 Manager Start/Stop/EnableModule:** Start launches an OTLP receiver on `127.0.0.1:4317` (gRPC) and `:4318` (HTTP); module toggles update the OBI config and signal reload.
+- **#71 AllowPID/BlockPID:** writes per-PID enable/disable into OBI's discovery config (a YAML file mounted from a ConfigMap).
+- **#72 L4 TCP translation, #73 HTTP/1.1 translation:** translate OTLP `ExportMetricsServiceRequest` / `ExportTraceServiceRequest` to `capture.Event`. Field-set commitment from 17.5 stands.
+- **#74 Contract tests:** fixtures are now recorded OTLP request bodies (binary protobuf), not eBPF event recordings. Simpler to capture; can be generated by replaying canary traffic through a real OBI.
+- **#75 Debug HTTP endpoint:** unchanged.
+- **#76 Self-obs metrics:** unchanged.
+- **#77 Panic recovery:** the agent-side panic recovery shrinks (no eBPF reader goroutine to wrap). What's added is *OBI container health monitoring* — if the OBI sidecar dies repeatedly, our agent emits `incluster_obs_capture_obi_restarts_total` and surfaces the issue. Container restart itself is k8s's job.
+
+**Implementation status.** Approved for v0.2 implementation on 2026-05-17. v0.2 work proceeds under the sibling-container model as documented above; the design is settled and not subject to re-litigation absent new information. Implementation is tracked across milestone v0.2 issues [#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77), whose bodies were updated on the same date to reflect this model. The first v0.2 implementation PR will include the manifest update adding the OBI container to the agent DaemonSet.
+
+---
+
+## ADR-0019: v0.2 Capture MVP implementation-time decisions
+
+**Status:** Accepted, 2026-05-17
+
+**Context.** v0.2 implementation under the sibling-container model ([ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library)) surfaced several small choices that aren't large enough to warrant individual ADRs but should be recorded for future readers. Filed here per the user's instruction to capture decisions in the append-only log.
+
+### 19.1 OTLP receiver = direct gRPC + stdlib net/http
+
+**Decision.** The OTLP receivers in `internal/otlpreceiver` use `google.golang.org/grpc` directly (registering the standard OTLP collector service stubs from `go.opentelemetry.io/proto/otlp`) plus stdlib `net/http` for the HTTP surface. We do NOT pull in the OpenTelemetry Collector SDK receiver components.
+
+**Why.** Smaller dep footprint (no Collector framework + its processors/exporters), simpler control flow, and our receive surface is narrow (three Export RPCs). The Collector SDK would help if we needed pluggable processing/export pipelines in the receiver itself; we don't.
+
+### 19.2 OBI config writer YAML library = gopkg.in/yaml.v3
+
+**Decision.** `internal/obiconfig` marshals via `gopkg.in/yaml.v3`. Rejected: `sigs.k8s.io/yaml` (wraps yaml.v2 with JSON-compatible tags — overkill since OBI's config schema doesn't need JSON round-tripping), encoding/json (OBI's config is YAML, not JSON).
+
+### 19.3 OBI reload mechanism = file-watch (write-then-rename)
+
+**Decision.** Per [`obi-integration.md`](obi-integration.md) §3.4 the agent writes OBI's config atomically (temp file + rename) and relies on OBI's built-in file watcher to pick it up. SIGHUP is the fallback if OBI's file watcher proves unreliable; not used in v0.2.
+
+**Why.** Avoids requiring `shareProcessNamespace: true` on the pod (which has security implications). The atomic-rename approach is the standard pattern for config-file-watching daemons.
+
+### 19.4 Reload coalescer debounce = 500 ms
+
+**Decision.** `bridgeManager`'s reload coalescer debounces rapid AllowPID/BlockPID/EnableModule/DisableModule calls over a 500 ms quiet window before invoking the OBI config writer. Matches the value documented in `obi-integration.md` §5.
+
+**Why.** A rollout that churns dozens of PIDs per second would otherwise produce dozens of OBI config rewrites + reload signals. 500 ms is long enough to coalesce a workload restart and short enough that operators don't perceive lag.
+
+### 19.5 OBI image tag pinned = v0.9.0
+
+**Decision.** The v0.2 DaemonSet manifest pins `ghcr.io/open-telemetry/obi:v0.9.0`. Future bumps follow the [ADR-0010](#adr-0010-obi-version-pinning-and-adapter) / [ADR-0018](#adr-0018-obi-as-sibling-container-not-embedded-library) single-bump-PR policy.
+
+### 19.6 Contract test fixtures = synthetic seed first, real OBI second
+
+**Decision.** v0.2 ships with synthetic seed fixtures (`l4-basic`, `http1-basic`) under `tests/contract/obi/testdata/translation/`, generated by `go test ./tests/contract/obi -seed -update`. The recipe for regenerating these from a real OBI sidecar (and replacing the synthetic ones) lives in `tests/contract/obi/REGENERATE.md`.
+
+**Why.** Real-OBI recording infrastructure (Kind + OTel-collector-as-recorder + canary workload) is a multi-hour build that's not on v0.2's critical path. Synthetic seeds give CI a working contract today; real recordings displace them on the first OBI image bump.
+
+### 19.7 pkg/capture exports TranslateMetrics / TranslateTraces
+
+**Decision.** The OTLP→Event translators are exported from `pkg/capture` (Stability: Experimental). Embedders can call them directly for ad-hoc OTLP translation; the contract-test harness uses this to bypass the OTLP-receiver roundtrip.
+
+**Why.** The alternative — keeping them unexported and reaching in via reflection from the contract tests — fought Go's unexported-field access rules and produced fragile test code. Exporting is cleaner, and the functions are useful enough that an embedder might want them.
+
+### 19.8 Stale-config detection deferred
+
+**Decision.** The "OBI rejects our config; agent backs off" detection mentioned in [`obi-integration.md`](obi-integration.md) §9 is **deferred to v0.3**. v0.2 trusts that the config it writes is valid (the YAML schema is small and exercised in unit tests); operators rely on OBI's startup logs if a config is rejected.
+
+**Why.** Implementing reliable detection requires either reading OBI's stderr (cross-container; needs Downward API or log scraping) or polling OBI's `/healthz`. Neither is on the v0.2 critical path; v0.3's controller work is a more natural home.
+
+---
+
+**Implemented in.** v0.2 milestone work; each commit references the relevant sub-decision when applicable. ADR is non-superseding — these are all forward-compatible implementation choices.
 
 ---
 

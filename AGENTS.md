@@ -8,7 +8,13 @@ This file documents conventions and operational context for working in this repo
 
 This repo is in the middle of a planned rewrite. The legacy POC code (Prometheus + eBPF agent at the root, OpenTelemetry sink/query pipeline under `opentelemetry/`, the `obs/` logging library) was removed early in the rewrite. POC code is preserved on `main` and reachable via `git log main -- <path>`.
 
-All code lives at the **repo root** as a single AP root and single Go module `github.com/gke-labs/in-cluster-observability` (per [ADR-0015](docs/design/decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). The **v0.1 Foundation** milestone ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) has landed: the AP root is bootstrapped, the public package skeletons exist with no-op implementations, the OBI adapter shell is in place, and the container image + DaemonSet manifest deploy as a no-op pod. v0.2 (Capture MVP) wires actual eBPF and the first real protocol modules.
+All code lives at the **repo root** as a single AP root and single Go module `github.com/gke-labs/in-cluster-observability` (per [ADR-0015](docs/design/decisions.md#adr-0015-collapse-core-to-repo-root-supersedes-adr-0013-layout)). Per [ADR-0018](docs/design/decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), OBI runs as a **sibling container** in the agent DaemonSet pod, not as an embedded Go library — our agent is an OTLP receiver + OBI config writer.
+
+Milestone status:
+
+- **v0.1 Foundation** ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) landed: AP root, public package skeletons, OBI adapter shell, container image, minimal DaemonSet.
+- **v0.2 Capture MVP** ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) landed: OTLP receivers (gRPC + HTTP loopback), OBI config writer, AllowPID/BlockPID with reload coalescer, L4 TCP + HTTP/1.1 translation, OTel self-obs metrics, panic recovery + ModuleDegraded events, debug HTTP endpoint, contract-test harness. DaemonSet now has two containers (obi sibling + agent).
+- **v0.3 Storage MVP** is next.
 
 What's in the repo:
 
@@ -17,11 +23,12 @@ What's in the repo:
 - `GEMINI.md` — stub pointing here
 - `.ap/` — autoproject config (`ap.yaml`, `headers.yaml`)
 - `go.mod` — single Go module
-- `cmd/ollie/` — default binary (stub in v0.1; prints version and exits unless `--stay-alive`)
-- `pkg/` — public API: `capture`, `obsapi`, `sink`, `topology`, `store`, `query`, `controller`, `schema`
-- `internal/` — private code; `internal/archtest/` enforces the OBI import boundary
+- `cmd/ollie/` — default binary; v0.2 starts OTLP receivers + OBI config writer + optional debug endpoint
+- `pkg/` — public API: `capture` (Manager + TranslateMetrics/TranslateTraces), `obsapi`, `sink`, `topology`, `store`, `query`, `controller`, `schema`
+- `internal/` — private packages: `obiconfig` (typed OBI YAML schema + atomic writer), `otlpreceiver` (loopback gRPC + HTTP OTLP receivers), `debugendpoint` (loopback PID-control HTTP), `archtest` (enforces OBI import boundary)
 - `images/ollie/` — Dockerfile (distroless static, CGO disabled)
-- `k8s/` — install manifests (namespace + DaemonSet + kustomization)
+- `k8s/` — install manifests (namespace + DaemonSet with `obi` + `agent` containers + kustomization)
+- `tests/contract/obi/` — OBI adapter contract tests + fixture harness
 - `dev/ci/presubmits/` — CI script wrappers
 - `.github/workflows/` — CI YAML
 - `LICENSE`, `README.md`, `.gitignore`
@@ -101,9 +108,15 @@ Every code/config artifact (Go, YAML, Dockerfile, proto, shell) carries the full
 
 ## OBI integration boundary
 
-The only package in the repo that may import `go.opentelemetry.io/obi/*` is `pkg/capture`. Everything else depends on the `capture.Manager` interface. The boundary is enforced by a Go test in [`internal/archtest`](internal/archtest) that parses every `.go` file in the module and fails if any path outside `pkg/capture` imports OBI directly — see [ADR-0010](docs/design/decisions.md#adr-0010-obi-version-pinning-and-adapter) and [ADR-0016](docs/design/decisions.md#adr-0016-obi-import-boundary-enforced-via-go-test).
+Per [ADR-0018](docs/design/decisions.md#adr-0018-obi-as-sibling-container-not-embedded-library), OBI runs as a **sibling container** in the agent DaemonSet pod, not as an embedded Go library. The agent is an OTLP receiver that consumes from OBI on localhost.
 
-OBI is pinned to one minor at a time; bumps live in their own PR with the contract-test suite green. See [`docs/design/obi-integration.md`](docs/design/obi-integration.md).
+Consequences for the codebase:
+
+- **No package imports `go.opentelemetry.io/obi/*`.** The boundary is now "zero OBI Go imports anywhere," still enforced by the Go test in [`internal/archtest`](internal/archtest) (see [ADR-0016](docs/design/decisions.md#adr-0016-obi-import-boundary-enforced-via-go-test)).
+- **OBI version pinning is image-tag based**, not `go.mod` based. The pin lives in `k8s/daemonset.yaml` and (once v1.0 lands) `helm/ollie/values.yaml`. Bump policy: one tag at a time, dedicated PR, contract tests green.
+- **`pkg/capture` is the OBI-bridge package** (OTLP receiver + OBI config writer), not a Go-API wrapper. It exposes the same `Manager` interface from v0.1; the implementation talks OTLP and writes OBI's config file.
+
+See [`docs/design/obi-integration.md`](docs/design/obi-integration.md) for the deployment topology, config flow, reload mechanism, and contract-test fixtures.
 
 ## Keeping this file current
 
