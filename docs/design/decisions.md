@@ -570,9 +570,88 @@ The build-it-ourselves direction was therefore both unnecessary (OBI does it) an
 
 ---
 
+## ADR-0022: v0.4 Control Plane implementation decisions
+
+**Status:** Accepted, 2026-05-18 — refines [ADR-0003](#adr-0003-onboarding-model--hybrid-crd) (CRD onboarding model is unchanged; this ADR pins the implementation details); narrows [ADR-0009](#adr-0009-informer-custody--hybrid) (identity broadcasting cut from v0.4 per ADR-0021, may reopen in v0.5+).
+
+**Context.** v0.4 is the Control Plane MVP — the milestone that replaces v0.3's `--obi-instrument-ports` smoke flag with declarative `TrafficMonitor` + `ClusterTrafficPolicy` CRDs reconciled by a Deployment-shaped controller that streams `MonitoringSpec` deltas to agents. `docs/design/control-plane.md` has the architecture; this ADR records the implementation choices made before code started landing so future readers can find the rationale in one place.
+
+### 22.1 API group = `ollie.gke-labs.dev` (was `obs.gke-labs.dev`)
+
+**Decision.** All v0.4 CRDs live at API group **`ollie.gke-labs.dev`**, version **`v1alpha1`** at landing. Supersedes the `obs.gke-labs.dev` placeholder that appeared in early drafts of `control-plane.md`.
+
+**Why.** Consistent with the project name "Ollie" and with the binary / image / metric prefix `ollie`. `kubectl get trafficmonitors.ollie.gke-labs.dev` reads naturally; `obs.gke-labs.dev` reads as "what is obs" to a first-time operator. Choosing now (before any CRD types exist on disk) avoids an API-version migration later.
+
+**Consequences.** Every CRD-touching artifact lands at this group: Go `// +groupName=ollie.gke-labs.dev`, CRD `metadata.name: <resource>.ollie.gke-labs.dev`, RBAC rules `apiGroups: [ollie.gke-labs.dev]`, kubectl invocations in docs.
+
+### 22.2 Controller framework = `sigs.k8s.io/controller-runtime`
+
+**Decision.** Use [`controller-runtime`](https://github.com/kubernetes-sigs/controller-runtime) (the SIG-API-Machinery library underlying kubebuilder) for the controller-side scaffolding: `manager.Manager`, `controller.Controller`, `reconcile.Reconciler`, generic typed `client.Client`, plus the `Lease`-based `leaderelection` package.
+
+**Why.** Standard in the K8s ecosystem; kubebuilder-compatible (we can adopt kubebuilder later if useful, or not); abstracts over the informer / workqueue / typed-client plumbing we'd otherwise hand-roll on top of raw client-go. Tested, well-trodden, and lets us focus on Ollie-specific reconcile logic instead of K8s plumbing.
+
+**Rejected alternative.** Raw `client-go` with hand-rolled informers / workqueues. Workable for small controllers but reinvents what controller-runtime already does well; nobody builds new controllers this way in 2026.
+
+### 22.3 Codegen = `controller-gen` only (no kubebuilder scaffolding, no client-gen)
+
+**Decision.** Wire `controller-gen` into `ap generate //...` to produce:
+
+- DeepCopy methods (`zz_generated_deepcopy.go`) for the CRD Go types.
+- CRD YAML manifests from `+kubebuilder:` markers, output to `k8s/crds/`.
+- RBAC YAML from `+kubebuilder:rbac:` markers on the reconciler types, output to `k8s/rbac/controller-generated.yaml`.
+
+Do **not** use kubebuilder project scaffolding (would force a directory layout that fights our existing `pkg/controller/` shape). Do **not** use client-go's `client-gen` / `lister-gen` / `informer-gen` (controller-runtime's generic typed client covers all the access patterns the reconciler needs).
+
+**Why.** Three reasons. (1) `controller-gen` is the de-facto K8s codegen tool — used by kubebuilder, Operator SDK, every modern controller framework. (2) Generation is markers-driven so the source of truth lives next to the types it describes, not in a separate YAML manifest. (3) `ap generate //...` already runs gofmt + a few other generators; adding `controller-gen` is one more entry, and `ap-verify-generate` will catch drift exactly the way it already does for gofmt.
+
+**Consequences.** A `tools/tools.go` blank-import keeps `controller-gen` in `go.mod`; the `ap generate` integration invokes `controller-gen` over `pkg/controller/api/v1alpha1/...`. Generated files (`zz_generated_*.go`, `k8s/crds/*.yaml`, `k8s/rbac/controller-generated.yaml`) are committed and verified by `ap-verify-generate` in CI.
+
+### 22.4 Validating admission webhook deferred from v0.4 to v0.5
+
+**Decision.** v0.4 ships **no `ValidatingWebhookConfiguration`**. Issue [#90](https://github.com/gke-labs/in-cluster-observability/issues/90) is reassigned to the v0.5 milestone. Cross-resource semantic validation (overlapping selectors, sink-reference resolution, conflict detection) moves into the reconciler and surfaces as a `Conflict` Condition on CR status.
+
+**Why.**
+
+- **The CRD OpenAPI schema gives most of the webhook's value for free.** `controller-gen` turns `+kubebuilder:validation:*` markers into OpenAPI schema; the K8s API server validates against it on every apply. Required fields, type checks, enum constraints, regex patterns, min/max ranges, CEL `XValidation` rules — all checked at apply time without a webhook.
+- **The remaining cross-resource checks work just as well in the reconciler.** "TrafficMonitor A and B select overlapping pods" can't be expressed in OpenAPI schema (multi-CR state), but the reconciler sees both CRs and emits a `Conflict` Condition on each within one reconcile tick. The operator's view is "apply succeeds, then `kubectl get trafficmonitor -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'` reads `False` with `Reason=ConflictsWith`" — same actionable error, no admission rejection.
+- **Removes a runtime dependency from v0.4 install.** A webhook needs HTTPS, which needs a cert, which needs cert-manager or an equivalent bootstrap (~1 CRD + 2 controllers + an admission webhook of its own). Deferring means v0.4's `kubectl apply -k k8s/` brings up CRDs + RBAC + controller Deployment + Service. No cert-manager required.
+
+**Consequences.** `docs/design/control-plane.md` §5 marked deferred with a pointer to this ADR. The reconciler design grows a `Conflict` Condition path (§9 of the same doc). v0.5 revisits when there is a concrete class of error the reconciler-based path cannot handle gracefully — until then, no webhook.
+
+**Rejected alternative.** Self-signed cert bootstrap (no cert-manager) — workable but reinvents cert-manager poorly; rotation logic becomes our problem.
+
+### 22.5 Identity broadcasting cut from v0.4 scope
+
+**Decision.** v0.4's controller does **not** run a canonical K8s informer for identity, does **not** maintain an `IdentityCache`, and does **not** stream `IdentitySnapshot` / `IdentityDelta` messages over the agent gRPC stream. The proto reserves the message tags for forward compatibility but no payload is sent. Issues [#101](https://github.com/gke-labs/in-cluster-observability/issues/101), [#102](https://github.com/gke-labs/in-cluster-observability/issues/102), [#103](https://github.com/gke-labs/in-cluster-observability/issues/103) remain on the v0.5 milestone where they already lived.
+
+**Why.** Per [ADR-0021](#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment), OBI's K8s metadata informer attaches `k8s.namespace.name`, `k8s.pod.name`, `k8s.deployment.name`, `k8s.statefulset.name`, `k8s.replicaset.name`, `k8s.daemonset.name`, `k8s.node.name`, `k8s.container.name`, `k8s.pod.uid`, `k8s.pod.start_time`, `k8s.cluster.name` to every captured event natively — without the controller having to broadcast anything. The ADR-0009 hybrid-custody model was designed for the pre-ADR-0021 architecture where the agent did its own enrichment; under the lean v0.3 / v0.4 architecture there is no agent-side enrichment to feed identity into.
+
+What remains is a smaller set of identity-needing use cases that *don't* coincide with OBI's informer:
+
+- Off-cluster peer attribution on L4 flows (external DBs, managed services).
+- `peer.k8s.*` enrichment on L7 spans (OBI's L7 uprobe path emits source-side identity only; L4 socket-filter mode gives dual-sided for free, so L7 is the gap).
+
+Neither is a v0.4 blocker; both are v0.5 candidates once the in-cluster store gives the agent a richer write-time hook to consume identity at.
+
+**Consequences.** `docs/design/control-plane.md` §3 retains a short note framing the deferral. The gRPC stream is simpler: `AgentSession (stream AgentMessage) returns (stream ControllerMessage)` carries only `MonitoringSpecDelta` + heartbeats. The controller's RBAC is correspondingly narrower — no `services`, no `endpointslices`, no informer for them (those would have fed the identity cache).
+
+---
+
+**Implemented in.** v0.4 milestone work, landing across four phases:
+
+- Phase 0: this ADR + the `control-plane.md` refresh.
+- Phase 1: CRD Go types + gRPC service stubs (closes #85, #86).
+- Phase 2: reconciler + gRPC stream + leader election (closes #87, #88, #89).
+- Phase 3: RBAC + CR status + AgentStatus feedback (closes #91, #92, #93).
+
+Each phase ships as its own PR against `main` from a stacked branch on the user's fork (`mastersingh24/in-cluster-observability`).
+
+---
+
 ## Open and superseded ADRs
 
 - **ADR-0017.4** — superseded by ADR-0021. OBI's native K8s attribute attachment is now ON; the agent attaches none.
 - **ADR-0020** — sub-decisions superseded in part by ADR-0021. See ADR-0021 consequences for the per-clause status.
+- **ADR-0009** — narrowed by ADR-0022.5. Identity broadcasting cut from v0.4 because OBI's informer covers the source-side case natively (ADR-0021); the ADR-0009 mechanism may reopen in v0.5+ for the off-cluster / L7-peer cases that OBI doesn't cover.
 
 New ADRs are appended above this section.

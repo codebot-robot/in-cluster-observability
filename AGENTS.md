@@ -15,7 +15,7 @@ Milestone status:
 - **v0.1 Foundation** ([#64](https://github.com/gke-labs/in-cluster-observability/issues/64)–[#69](https://github.com/gke-labs/in-cluster-observability/issues/69)) landed: AP root, public package skeletons, OBI adapter shell, container image, minimal DaemonSet.
 - **v0.2 Capture MVP** ([#70](https://github.com/gke-labs/in-cluster-observability/issues/70)–[#77](https://github.com/gke-labs/in-cluster-observability/issues/77)) landed: OTLP receivers (gRPC + HTTP loopback), OBI config writer, AllowPID/BlockPID with reload coalescer, L4 TCP + HTTP/1.1 translation, OTel self-obs metrics, panic recovery + ModuleDegraded events, debug HTTP endpoint, contract-test harness. DaemonSet now has two containers (obi sibling + agent).
 - **v0.3 (lean) — agent + OBI native enrichment** (per [ADR-0021](docs/design/decisions.md#adr-0021-lean-v03--agent-re-uses-obis-native-enrichment), supersedes the original v0.3 "Storage MVP" plan). Adds: OBI v0.9 schema fixes in `internal/obiconfig` (`discovery.instrument` + `open_ports` string + `target_pids`), `--obi-instrument-ports` smoke-test seed, OTel SDK Prometheus exporter always-on with a forwarder that re-records OBI's translated metrics, `--scrape-addr` agent listener at `:9090`, RBAC for OBI's K8s metadata informer, DaemonSet refactor (right caps + `OTEL_EBPF_CONFIG_PATH` env var + `/var/run/obi` + `/sys/fs/cgroup` mounts). What we explicitly did *not* build: a separate `internal/pidcache`, `internal/enricher`, `pkg/sink/promscrape`, or `pkg/store.MetricStore` — OBI's K8s informer + the OTel SDK + this single forwarder replace all of them.
-- **v0.4 Control Plane MVP** is next: CRDs (`TrafficMonitor` / `ClusterTrafficPolicy`), controller, gRPC stream pushing `MonitoringSpec` to agents, then the controller's `AllowPID` calls flow into the same OBI config writer the agent has today.
+- **v0.4 Control Plane MVP** in progress (per [ADR-0022](docs/design/decisions.md#adr-0022-v04-control-plane-implementation-decisions)). Ships across 4 stacked phase PRs: design refresh + ADR (Phase 0), CRD types + gRPC stubs (Phase 1), reconciler + stream + leader election (Phase 2), RBAC + CR status + AgentStatus (Phase 3). Decisions pinned: API group `ollie.gke-labs.dev`, controller framework `sigs.k8s.io/controller-runtime`, codegen `controller-gen` only, validating webhook deferred to v0.5, identity broadcasting cut (OBI's informer covers source-side per ADR-0021).
 
 What's in the repo:
 
@@ -51,20 +51,39 @@ This clone is a fork of `gke-labs/in-cluster-observability`. **All issues and mi
 
 ### Branch and PR workflow
 
-**One integration branch per milestone**, named after the milestone: `v0.1`, `v0.2`, …, `v1.0`. PRs **stack**: each milestone branch PRs to the previous (`v0.2` → `v0.1`, `v0.3` → `v0.2`, …), with `v0.1` → `main` at the bottom of the stack. When a milestone PR merges to `main`, GitHub auto-updates the next PR's base — the stack collapses one PR at a time.
+Two patterns coexist — the right one depends on how stacked the work is.
+
+#### Single-branch milestones (v0.1 → v0.3 used this)
+
+One integration branch per milestone, named after the milestone: `v0.1`, `v0.2`, …, `v1.0`. The branch lived on `upstream` and PR'd to `main` (or to the previous milestone branch before it merged).
+
+This pattern is fine when the milestone's work is small enough to review as a single unit.
+
+#### Phase-stacked milestones (v0.4+ default)
+
+Larger milestones split into stacked **phase branches** under the milestone, each its own PR. Naming: `v0.4/phase-0-design`, `v0.4/phase-1-apis`, `v0.4/phase-2-controller`, `v0.4/phase-3-status`. The slash groups branches together in `git branch` output.
+
+Phase branches live on the personal fork (`origin = mastersingh24/in-cluster-observability`), not on `upstream`, so:
+
+- Force-pushes during iteration don't churn upstream's branch list.
+- Each phase PR is a **cross-fork PR** opened against `gke-labs/in-cluster-observability` `main`: `gh pr create --repo gke-labs/in-cluster-observability --base main --head mastersingh24:v0.4/phase-N-...`.
+- The phase PR diff includes the prior phases' commits as context until those phases merge to `main` — that's the trade for cleaner upstream branch hygiene.
+- When phase N's PR merges, rebase phase N+1 onto the new `upstream/main` (`git rebase upstream/main`, then `git push --force-with-lease origin v0.4/phase-(N+1)-...`). The phase N+1 PR's diff shrinks because phase N's commits are now on main.
 
 ```
-main ◄── PR ── v0.1 ◄── PR ── v0.2 ◄── PR ── v0.3 ── …
-        (#125)         (next)         (next)
+upstream/main ◄── PR ── mastersingh24:v0.4/phase-0-design   (#first)
+              ◄── PR ── mastersingh24:v0.4/phase-1-apis     (rebases as phase-0 merges)
+              ◄── PR ── mastersingh24:v0.4/phase-2-controller  (likewise)
+              ◄── PR ── mastersingh24:v0.4/phase-3-status     (likewise)
 ```
 
-Rules:
+Rules (apply to both patterns):
 
-- **Commit fine-grained on the active milestone branch.** One logically separable unit per commit. No WIP megacommits. Per-issue feature branches are allowed for large or risky work but not required by default.
-- **Each milestone PR is the review gate** for that milestone's work.
-- **Never commit directly to `main`.** Main only advances by merging the bottom of the stack.
-- **Starting milestone vN.M:** `git checkout -b vN.M v<prev>` off the previous milestone branch's tip, `git push -u upstream vN.M`, then `gh pr create --base v<prev> --head vN.M`.
-- **Hygiene fixups** for an in-flight milestone go on that milestone's branch (small commits extending its PR) — not on `main`, not on a later milestone branch.
+- **Commit fine-grained on the active phase branch.** One logically separable unit per commit. No WIP megacommits.
+- **Each phase PR is the review gate** for that phase's work.
+- **Never commit directly to `main`.** Main only advances by merging phase PRs (or single-branch milestone PRs).
+- **Rebase, don't merge, between phases.** Linear history per phase. (See the `rebase-between-milestones` memory.)
+- **Hygiene fixups** for an in-flight phase go on that phase's branch (small commits extending its PR) — not on `main`, not on a later phase branch.
 
 ## Build, test, lint
 

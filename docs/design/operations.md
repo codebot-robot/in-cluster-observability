@@ -70,7 +70,7 @@ The query server is the only component that takes external traffic (custom-metri
 
 ```yaml
 rules:
-  - apiGroups: [obs.gke-labs.dev]
+  - apiGroups: [ollie.gke-labs.dev]
     resources: [trafficmonitors, clustertrafficpolicies]
     verbs: [get, list]
   - apiGroups: [""]
