@@ -21,6 +21,38 @@ Transparent, eBPF-based network observability for Kubernetes workloads. Zero ins
 
 {{% /blocks/lead %}}
 
+{{% blocks/section color="white" %}}
+
+## Should I try this today?
+
+`in-cluster-observability` is on a milestone cadence and v0.3 is the first release with anything user-observable end-to-end. Use this to self-select before you spend 10 minutes on the Kind walkthrough.
+
+### Yes — try v0.3 today if …
+
+- You're **evaluating the architecture / direction** and want a working demo on Kind to validate the thesis (zero-instrumentation L4 + L7 metrics with K8s identity, OBI as a sibling container, single Prometheus URL).
+- You want **OBI's metrics pre-wired with K8s labels** without figuring out the OBI capability set, K8s informer RBAC, and `OTEL_EBPF_CONFIG_PATH` env var yourself — the manifest captures hard-won setup knowledge.
+- You have **HTTP/1.1 workloads** to play with (nginx, simple HTTP services) and an existing Prometheus to scrape them.
+- You want to **file issues or contribute** against the v0.4 controller, v0.5 store, or v0.6 hardening milestones.
+
+### Come back for v0.4–v0.5 if …
+
+- You want to **scope monitoring per-workload** via declarative `TrafficMonitor` CRDs (label selectors, not "every process on port 80"). → v0.4.
+- You want **HPA scaling driven by captured network metrics** (the `custom.metrics.k8s.io` API). → v0.5.
+- You want **in-cluster PromQL** over captured data without piping it out to Cortex / Mimir. → v0.5.
+- You want **span / edge persistence** and a query path for spans (`iobsctl spans --filter '...'`). → v0.5.
+- You want **AI-agent streaming** with CEL-filtered subscriptions. → v0.5.
+
+### Come back for v0.6 / v1.0 if …
+
+- Your workloads use **HTTP/2, gRPC, or TLS** — v0.3 covers L4 + HTTP/1.1 only; the rest lands in v0.6.
+- You're worried about **cardinality blowups** from high-variability URL paths — path templating, sampling, and peer-IP collapse arrive in v0.6.
+- You want a **Helm chart, operator runbook, upgrade guide, or multi-arch images** — those are v1.0 deliverables.
+- You're **running this in production** — wait for v1.0; v0.3 has no upgrade path and no SLOs.
+
+If you fit any of the "wait for" rows, the [roadmap]({{< relref "docs/roadmap.md" >}}) tracks expected scope per milestone, and starring / watching the [upstream repo](https://github.com/gke-labs/in-cluster-observability) is the easiest way to know when to revisit.
+
+{{% /blocks/section %}}
+
 {{% blocks/section color="dark" type="row" %}}
 
 {{% blocks/feature icon="fa-solid fa-eye" title="Zero instrumentation" url="docs/architecture/" %}}
