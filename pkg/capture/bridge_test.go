@@ -70,8 +70,8 @@ func TestNewBridge_WritesInitialOBIConfigOnStart(t *testing.T) {
 	if !strings.Contains(content, "127.0.0.1:4317") {
 		t.Errorf("expected endpoint in initial config; got:\n%s", content)
 	}
-	if !strings.Contains(content, "enable: false") {
-		t.Errorf("expected K8s attrs disabled in initial config; got:\n%s", content)
+	if !strings.Contains(content, "enable: true") {
+		t.Errorf("expected K8s attrs enabled in initial config (ADR-0021); got:\n%s", content)
 	}
 }
 

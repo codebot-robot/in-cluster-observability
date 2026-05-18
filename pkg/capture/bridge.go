@@ -335,10 +335,9 @@ func (b *bridgeManager) writeReload() {
 }
 
 // buildConfig derives an OBI config from the current bridgeManager
-// state. For each tracked PID a Service entry is emitted; OBI's
-// discovery selector resolves it to the matching process. v0.2's
-// schema is a starting point — the exact selector fields will be
-// refined once verified against a real OBI image (#74 contract tests).
+// state. For each tracked PID one Instrument entry is emitted with
+// the PID set as OBI's `target_pids` selector. v0.3 has no port info
+// in the spec; controllers populate this in v0.4.
 func (b *bridgeManager) buildConfig() obiconfig.File {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -347,22 +346,22 @@ func (b *bridgeManager) buildConfig() obiconfig.File {
 	if len(b.pids) == 0 {
 		return file
 	}
-	services := make([]obiconfig.Service, 0, len(b.pids))
+	entries := make([]obiconfig.Instrument, 0, len(b.pids))
 	for pid, spec := range b.pids {
-		services = append(services, obiconfig.Service{
-			Name:      fmt.Sprintf("pid-%d", pid),
-			OpenPorts: portsFromSpec(spec),
-			PIDs:      []uint32{pid},
+		entries = append(entries, obiconfig.Instrument{
+			Name:       fmt.Sprintf("pid-%d", pid),
+			TargetPIDs: []uint32{pid},
+			OpenPorts:  portsFromSpec(spec),
 		})
 	}
-	file.Discovery.Services = services
+	file.Discovery.Instrument = entries
 	return file
 }
 
-// portsFromSpec extracts open_ports from a PIDSpec. v0.2 has no port
-// information in the spec yet — controllers will populate this in
-// v0.4. Returns nil for now.
-func portsFromSpec(_ PIDSpec) []uint16 { return nil }
+// portsFromSpec extracts open_ports from a PIDSpec as OBI's
+// comma-separated string format. v0.2/v0.3 have no port info in the
+// spec; controllers populate this in v0.4. Returns "" for now.
+func portsFromSpec(_ PIDSpec) string { return "" }
 
 // bridgeHandler implements otlpreceiver.Handler. v0.2 forwards each
 // payload to the translator (#72, #73). For #70 the handler just
