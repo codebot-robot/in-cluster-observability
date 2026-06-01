@@ -153,10 +153,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "scrape endpoint: http://%s/metrics\n", l.Addr())
 	}
 
+	traceStore := debugendpoint.NewTraceStore(5000)
+
 	// Loopback debug endpoint (off by default).
 	if *debugEnable {
 		opts := []debugendpoint.Option{
 			debugendpoint.WithExtraHandler("GET /debug/metrics", promHandler),
+			debugendpoint.WithTraceStore(traceStore),
 		}
 		dbg, err := debugendpoint.New(mgr, *debugAddr, opts...)
 		if err != nil {
@@ -170,17 +173,24 @@ func main() {
 		}
 		defer dbg.Stop(context.Background())
 		fmt.Fprintf(os.Stderr, "debug endpoint enabled on %s (loopback); /debug/metrics serves agent self-obs\n", actualAddr)
+		fmt.Fprintf(os.Stderr, "debug endpoint: http://%s/debug/explorer serves HTML Trace Explorer\n", actualAddr)
 	}
 
 	// Forwarder + writer: re-emit each MetricEvent into the OTel SDK
 	// Meter so OBI's translated metrics flow out via the same
-	// Prometheus exporter the scrape listener serves. SpanEvent /
-	// EdgeEvent are drained for now (v0.5 wires them into the store).
+	// Prometheus exporter the scrape listener serves. SpanEvents are stored in the traceStore.
 	fwd := newMetricForwarder(mp.Meter("ollie/obi-forwarder"))
 	go func() {
 		for ev := range mgr.Events() {
-			if ev.Kind == capture.EventMetric && ev.Metric != nil {
-				fwd.Record(ctx, *ev.Metric)
+			switch ev.Kind {
+			case capture.EventMetric:
+				if ev.Metric != nil {
+					fwd.Record(ctx, *ev.Metric)
+				}
+			case capture.EventSpan:
+				if ev.Span != nil {
+					traceStore.Add(ev.Span)
+				}
 			}
 		}
 	}()

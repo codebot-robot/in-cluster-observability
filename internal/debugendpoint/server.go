@@ -39,11 +39,15 @@ const DefaultAddr = "127.0.0.1:9099"
 // Server hosts the debug endpoints over Manager.
 //
 // Stability: Experimental
+// Server hosts the debug endpoints over Manager.
+//
+// Stability: Experimental
 type Server struct {
-	mgr    capture.Manager
-	addr   string
-	srv    *http.Server
-	listen net.Listener
+	mgr        capture.Manager
+	addr       string
+	srv        *http.Server
+	listen     net.Listener
+	traceStore *TraceStore
 
 	// extra is the operator-provided extra-handler set. Mounted under
 	// the registered path on Start. Keyed by path; last writer wins.
@@ -54,6 +58,13 @@ type Server struct {
 //
 // Stability: Experimental
 type Option func(*Server)
+
+// WithTraceStore registers a TraceStore with the debug server.
+func WithTraceStore(ts *TraceStore) Option {
+	return func(s *Server) {
+		s.traceStore = ts
+	}
+}
 
 // WithExtraHandler mounts h at path on the debug mux. Path must begin
 // with /debug/ so it stays in the debug-endpoint namespace. Multiple
@@ -86,7 +97,11 @@ func New(mgr capture.Manager, addr string, opts ...Option) (*Server, error) {
 	if err := requireLoopback(addr); err != nil {
 		return nil, err
 	}
-	s := &Server{mgr: mgr, addr: addr}
+	s := &Server{
+		mgr:        mgr,
+		addr:       addr,
+		traceStore: NewTraceStore(5000),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -106,6 +121,8 @@ func (s *Server) Start(ctx context.Context) (string, error) {
 	mux.HandleFunc("POST /debug/allow-pid", s.handleAllowPID)
 	mux.HandleFunc("POST /debug/block-pid", s.handleBlockPID)
 	mux.HandleFunc("GET /debug/state", s.handleState)
+	mux.HandleFunc("GET /debug/api/traces", s.handleAPITraces)
+	mux.HandleFunc("GET /debug/explorer", s.handleExplorer)
 	for path, h := range s.extra {
 		mux.Handle(path, h)
 	}
@@ -188,4 +205,27 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleAPITraces(w http.ResponseWriter, r *http.Request) {
+	traceID := r.URL.Query().Get("trace_id")
+	w.Header().Set("Content-Type", "application/json")
+
+	if traceID != "" {
+		spans := s.traceStore.GetTraceSpans(traceID)
+		if err := json.NewEncoder(w).Encode(spans); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	summaries := s.traceStore.GetTraceSummaries()
+	if err := json.NewEncoder(w).Encode(summaries); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleExplorer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(ExplorerHTML))
 }

@@ -198,3 +198,76 @@ func TestStopIdempotent(t *testing.T) {
 	cleanup() // second stop should be benign (handlers cleanup is no-op)
 	time.Sleep(10 * time.Millisecond)
 }
+
+func TestTraceEndpoints(t *testing.T) {
+	mgr, _ := capture.NewBridge(capture.Config{})
+	_ = mgr.Start(context.Background())
+	defer func() { _ = mgr.Stop(context.Background()) }()
+
+	ts := debugendpoint.NewTraceStore(10)
+	ts.Add(&capture.SpanEvent{
+		Name:        "GET /test",
+		TraceID:     "abc123trace",
+		SpanID:      "span1",
+		StartTimeNs: 1000,
+		EndTimeNs:   2000,
+	})
+
+	srv, err := debugendpoint.New(mgr, "127.0.0.1:0", debugendpoint.WithTraceStore(ts))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Stop(context.Background()) }()
+
+	// Verify /debug/explorer serves HTML
+	resp, err := http.Get("http://" + addr + "/debug/explorer")
+	if err != nil {
+		t.Fatalf("GET /debug/explorer: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("explorer status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Ollie Trace Explorer") {
+		t.Errorf("explorer HTML missing title")
+	}
+
+	// Verify /debug/api/traces serves summaries
+	resp2, err := http.Get("http://" + addr + "/debug/api/traces")
+	if err != nil {
+		t.Fatalf("GET /debug/api/traces: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("api status = %d, want 200", resp2.StatusCode)
+	}
+	var summaries []debugendpoint.TraceSummary
+	if err := json.NewDecoder(resp2.Body).Decode(&summaries); err != nil {
+		t.Fatalf("decode summaries: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].TraceID != "abc123trace" {
+		t.Errorf("incorrect summaries returned: %v", summaries)
+	}
+
+	// Verify /debug/api/traces?trace_id=abc123trace serves spans
+	resp3, err := http.Get("http://" + addr + "/debug/api/traces?trace_id=abc123trace")
+	if err != nil {
+		t.Fatalf("GET /debug/api/traces?trace_id: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("api spans status = %d, want 200", resp3.StatusCode)
+	}
+	var spans []*capture.SpanEvent
+	if err := json.NewDecoder(resp3.Body).Decode(&spans); err != nil {
+		t.Fatalf("decode spans: %v", err)
+	}
+	if len(spans) != 1 || spans[0].SpanID != "span1" {
+		t.Errorf("incorrect spans returned: %v", spans)
+	}
+}
