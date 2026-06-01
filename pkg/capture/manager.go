@@ -279,6 +279,16 @@ type SpanEvent struct {
 	StatusCode int
 	// DurationNs is the span duration in nanoseconds.
 	DurationNs uint64
+	// TraceID is the hex-encoded OTel TraceID.
+	TraceID string
+	// SpanID is the hex-encoded OTel SpanID.
+	SpanID string
+	// ParentSpanID is the hex-encoded OTel ParentSpanID (empty if root).
+	ParentSpanID string
+	// StartTimeNs is the start timestamp in unix nanoseconds.
+	StartTimeNs uint64
+	// EndTimeNs is the end timestamp in unix nanoseconds.
+	EndTimeNs uint64
 	// Attributes is the merged set of resource + span attributes.
 	// Per ADR-0021 OBI's k8s.* / service.* attrs flow through.
 	Attributes map[string]string

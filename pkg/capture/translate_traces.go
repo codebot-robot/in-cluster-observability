@@ -15,6 +15,7 @@
 package capture
 
 import (
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"time"
@@ -41,12 +42,17 @@ func TranslateTraces(rs []*tracepb.ResourceSpans) []Event {
 			for _, sp := range ss.GetSpans() {
 				attrs := mergeMaps(resAttrs, kvToMap(sp.GetAttributes()))
 				se := &SpanEvent{
-					Name:       sp.GetName(),
-					Method:     pickFirst(attrs, "http.request.method", "http.method"),
-					Path:       pickFirst(attrs, "url.path", "http.url", "http.target"),
-					StatusCode: parseStatus(pickFirst(attrs, "http.response.status_code", "http.status_code")),
-					DurationNs: spanDurationNs(sp),
-					Attributes: attrs,
+					Name:         sp.GetName(),
+					Method:       pickFirst(attrs, "http.request.method", "http.method"),
+					Path:         pickFirst(attrs, "url.path", "http.url", "http.target"),
+					StatusCode:   parseStatus(pickFirst(attrs, "http.response.status_code", "http.status_code")),
+					DurationNs:   spanDurationNs(sp),
+					TraceID:      hex.EncodeToString(sp.GetTraceId()),
+					SpanID:       hex.EncodeToString(sp.GetSpanId()),
+					ParentSpanID: hex.EncodeToString(sp.GetParentSpanId()),
+					StartTimeNs:  sp.GetStartTimeUnixNano(),
+					EndTimeNs:    sp.GetEndTimeUnixNano(),
+					Attributes:   attrs,
 				}
 				out = append(out, Event{
 					Kind:      EventSpan,
