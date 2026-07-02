@@ -2,6 +2,8 @@ module github.com/gke-labs/in-cluster-observability
 
 go 1.26.0
 
+toolchain go1.26.4
+
 require (
 	github.com/prometheus/client_golang v1.23.2
 	go.opentelemetry.io/otel v1.43.0
