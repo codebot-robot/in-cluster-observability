@@ -35,7 +35,7 @@ func TestNewBridge_LifecycleWithoutOBIWriterOrReceivers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start with empty addrs/path: %v", err)
 	}
@@ -57,10 +57,10 @@ func TestNewBridge_WritesInitialOBIConfigOnStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -82,12 +82,12 @@ func TestNewBridge_GRPCReceiverAcceptsOTLP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	// The receiver bound on an ephemeral port; we need to fish out the
 	// actual address. The bridge does not expose that, but the test
@@ -112,7 +112,7 @@ func TestNewBridge_GRPCReceiverEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := mgr.Start(ctx); err != nil {
 		if strings.Contains(err.Error(), "address already in use") {
@@ -120,7 +120,7 @@ func TestNewBridge_GRPCReceiverEndToEnd(t *testing.T) {
 		}
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -152,10 +152,10 @@ func TestNewBridge_ModuleToggleWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	if err := mgr.EnableModule(capture.ModuleHTTP1, capture.ModuleConfig{}); err != nil {
 		t.Fatalf("EnableModule: %v", err)
@@ -173,7 +173,7 @@ func TestNewBridge_ModuleToggleWritesConfig(t *testing.T) {
 
 func TestNewBridge_AllowBlockPID_IsIdempotent(t *testing.T) {
 	mgr, _ := capture.NewBridge(capture.Config{})
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 	spec := capture.PIDSpec{Protocols: []capture.Module{capture.ModuleL4TCP}}
 	if err := mgr.AllowPID(42, spec); err != nil {
 		t.Fatalf("AllowPID: %v", err)
@@ -191,7 +191,7 @@ func TestNewBridge_AllowBlockPID_IsIdempotent(t *testing.T) {
 
 func TestNewBridge_StartAfterStop(t *testing.T) {
 	mgr, _ := capture.NewBridge(capture.Config{})
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = mgr.Start(ctx)
 	_ = mgr.Stop(ctx)
 	if err := mgr.Start(ctx); !errors.Is(err, capture.ErrStopped) {

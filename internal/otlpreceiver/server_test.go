@@ -77,12 +77,12 @@ func TestServer_GRPCReceivesAllThreeSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer s.Stop(context.Background())
+	defer s.Stop(t.Context())
 
 	grpcAddr, _ := s.Addrs()
 	if grpcAddr == "" {
@@ -128,12 +128,12 @@ func TestServer_HTTPReceivesProtobufAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer s.Stop(context.Background())
+	defer s.Stop(t.Context())
 
 	_, httpAddr := s.Addrs()
 
@@ -178,11 +178,11 @@ func TestServer_StopIdempotent(t *testing.T) {
 		GRPCAddr: "127.0.0.1:0",
 		Handler:  &countHandler{},
 	})
-	_ = s.Start(context.Background())
-	if err := s.Stop(context.Background()); err != nil {
+	_ = s.Start(t.Context())
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := s.Stop(context.Background()); err != nil {
+	if err := s.Stop(t.Context()); err != nil {
 		t.Fatalf("repeated Stop should be no-op: %v", err)
 	}
 }

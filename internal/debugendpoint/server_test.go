@@ -16,7 +16,6 @@ package debugendpoint_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -34,20 +33,20 @@ func newServer(t *testing.T) (string, capture.Manager, func()) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	srv, err := debugendpoint.New(mgr, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	addr, err := srv.Start(context.Background())
+	addr, err := srv.Start(t.Context())
 	if err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
 	return addr, mgr, func() {
-		_ = srv.Stop(context.Background())
-		_ = mgr.Stop(context.Background())
+		_ = srv.Stop(t.Context())
+		_ = mgr.Stop(t.Context())
 	}
 }
 
@@ -151,25 +150,25 @@ func TestExtraHandler_PromMetricsScrape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = mgr.Stop(context.Background()) })
+	t.Cleanup(func() { _ = mgr.Stop(t.Context()) })
 
 	srv, err := debugendpoint.New(mgr, "127.0.0.1:0",
 		debugendpoint.WithExtraHandler("GET /debug/metrics", h))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	addr, err := srv.Start(context.Background())
+	addr, err := srv.Start(t.Context())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+	t.Cleanup(func() { _ = srv.Stop(t.Context()) })
 
 	// Tick the counter so it actually shows up in the scrape — OTel
 	// SDK omits never-recorded instruments by default.
-	mgr.Metrics().EventsTotal.Add(context.Background(), 1)
+	mgr.Metrics().EventsTotal.Add(t.Context(), 1)
 
 	resp, err := http.Get("http://" + addr + "/debug/metrics")
 	if err != nil {

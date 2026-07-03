@@ -35,18 +35,18 @@ func TestReportOBIRestart_BelowThreshold_NoDegradeEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 	_ = mgr.EnableModule(capture.ModuleL4TCP, capture.ModuleConfig{})
 
 	r, ok := mgr.(restartReporter)
 	if !ok {
 		t.Fatal("bridge manager should implement ReportOBIRestart")
 	}
-	r.ReportOBIRestart(context.Background(), 1)
-	r.ReportOBIRestart(context.Background(), 2)
+	r.ReportOBIRestart(t.Context(), 1)
+	r.ReportOBIRestart(t.Context(), 2)
 
 	select {
 	case ev := <-mgr.Events():
@@ -63,16 +63,16 @@ func TestReportOBIRestart_AtThreshold_EmitsDegradedPerModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	_ = mgr.EnableModule(capture.ModuleL4TCP, capture.ModuleConfig{})
 	_ = mgr.EnableModule(capture.ModuleHTTP1, capture.ModuleConfig{})
 
 	r := mgr.(restartReporter)
-	r.ReportOBIRestart(context.Background(), 3) // ≥ threshold
+	r.ReportOBIRestart(t.Context(), 3) // ≥ threshold
 
 	got := map[capture.Module]bool{}
 	timer := time.NewTimer(500 * time.Millisecond)
@@ -94,12 +94,12 @@ func TestReportOBIRestart_AtThreshold_EmitsDegradedPerModule(t *testing.T) {
 
 func TestReportOBIRestart_NoModulesEnabled_NoDegrade(t *testing.T) {
 	mgr, _ := capture.NewBridge(capture.Config{})
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 	r := mgr.(restartReporter)
-	r.ReportOBIRestart(context.Background(), 10)
+	r.ReportOBIRestart(t.Context(), 10)
 
 	select {
 	case ev := <-mgr.Events():

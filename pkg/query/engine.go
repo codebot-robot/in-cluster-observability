@@ -23,4 +23,4 @@ package query
 // with their respective return types.
 //
 // Stability: Stable
-type Engine interface{}
+type Engine any
