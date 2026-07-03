@@ -1,6 +1,8 @@
 module github.com/gke-labs/in-cluster-observability/docs/site
 
-go 1.25
+go 1.26.0
+
+toolchain go1.26.4
 
 require github.com/google/docsy v0.15.0
 

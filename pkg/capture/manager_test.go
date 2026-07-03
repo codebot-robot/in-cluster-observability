@@ -15,7 +15,6 @@
 package capture_test
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -27,7 +26,7 @@ func TestNew_LifecycleNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -44,7 +43,7 @@ func TestNew_LifecycleNoop(t *testing.T) {
 
 func TestNew_PIDLifecycleIsIdempotent(t *testing.T) {
 	mgr, _ := capture.New(capture.Config{})
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 	spec := capture.PIDSpec{Protocols: []capture.Module{capture.ModuleL4TCP}}
 	if err := mgr.AllowPID(42, spec); err != nil {
 		t.Fatalf("AllowPID: %v", err)
@@ -62,7 +61,7 @@ func TestNew_PIDLifecycleIsIdempotent(t *testing.T) {
 
 func TestNew_ModulesToggle(t *testing.T) {
 	mgr, _ := capture.New(capture.Config{})
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 	if got := mgr.EnabledModules(); len(got) != 0 {
 		t.Fatalf("empty manager; got %d modules", len(got))
 	}
@@ -82,7 +81,7 @@ func TestNew_ModulesToggle(t *testing.T) {
 
 func TestNew_EventsClosedOnStop(t *testing.T) {
 	mgr, _ := capture.New(capture.Config{})
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = mgr.Start(ctx)
 	ch := mgr.Events()
 	_ = mgr.Stop(ctx)

@@ -15,7 +15,6 @@
 package capture_test
 
 import (
-	"context"
 	"testing"
 
 	"go.opentelemetry.io/otel/metric/noop"
@@ -57,14 +56,14 @@ func TestNewMetrics_NilProviderDefaultsToNoop(t *testing.T) {
 func TestNewMetrics_CountersRecord(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer func() { _ = mp.Shutdown(context.Background()) }()
+	defer func() { _ = mp.Shutdown(t.Context()) }()
 
 	m, err := capture.NewMetrics(mp)
 	if err != nil {
 		t.Fatalf("NewMetrics: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	m.EventsTotal.Add(ctx, 5)
 	m.EventsDroppedTotal.Add(ctx, 2)
 	m.ActivePIDs.Add(ctx, 3)

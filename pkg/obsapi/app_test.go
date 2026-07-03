@@ -65,7 +65,7 @@ func TestRun_BlocksUntilContextDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- app.Run(ctx) }()
 	cancel()

@@ -15,7 +15,6 @@
 package capture_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,10 +54,10 @@ func TestAllowPID_WritesDiscoveryService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	if err := mgr.AllowPID(12345, capture.PIDSpec{
 		Protocols: []capture.Module{capture.ModuleHTTP1},
@@ -82,10 +81,10 @@ func TestBlockPID_RemovesDiscoveryService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	_ = mgr.AllowPID(12345, capture.PIDSpec{})
 	_ = readConfigSettling(t, path, "pid-12345", 3*time.Second)
@@ -114,10 +113,10 @@ func TestAllowPID_Coalescing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	// Burst: 100 AllowPIDs in a tight loop. The coalescer should produce
 	// a single write at the end, not 100.
@@ -147,10 +146,10 @@ func TestInitialOpenPorts_SeedsDiscoveryAtStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	content := readConfigSettling(t, path, "open_ports: 80,8080", 2*time.Second)
 	if !strings.Contains(content, "instrument:") {
@@ -174,10 +173,10 @@ func TestInitialOpenPorts_DisplacedByAllowPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	_ = readConfigSettling(t, path, "name: smoke", 2*time.Second)
 	_ = mgr.AllowPID(2024, capture.PIDSpec{})
@@ -200,10 +199,10 @@ func TestAllowPID_IdempotentDoesNotRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	if err := mgr.Start(context.Background()); err != nil {
+	if err := mgr.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer mgr.Stop(context.Background())
+	defer mgr.Stop(t.Context())
 
 	spec := capture.PIDSpec{}
 	_ = mgr.AllowPID(42, spec)
