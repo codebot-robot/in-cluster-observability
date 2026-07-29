@@ -50,9 +50,17 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 	h := &Harness{t: t, ClusterName: clusterName}
 
 	out, err := exec.Command("kind", "get", "clusters").Output()
-	if err == nil && containsLine(string(out), clusterName) {
+	if err == nil && containsLine(string(out), clusterName) && h.clusterAlive() {
 		t.Logf("kind cluster %q already exists; reusing", clusterName)
 	} else {
+		// A cluster that is listed but not answering is usually one
+		// caught mid-teardown by the previous test's cleanup (kind
+		// delete can return while the node container is still dying);
+		// exec'ing into it fails with setns errors. Delete + recreate.
+		if err == nil && containsLine(string(out), clusterName) {
+			t.Logf("kind cluster %q exists but is not responding; recreating", clusterName)
+			_ = exec.Command("kind", "delete", "cluster", "--name", clusterName).Run()
+		}
 		t.Logf("creating kind cluster %q", clusterName)
 		h.Run("kind", "create", "cluster", "--name", clusterName, "--wait", "2m")
 	}
@@ -68,6 +76,17 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 		}
 	})
 	return h
+}
+
+// clusterAlive reports whether the named cluster's API server
+// answers and its node container accepts exec (the two things a
+// half-deleted cluster fails).
+func (h *Harness) clusterAlive() bool {
+	if err := exec.Command("kubectl", "--context", h.context(),
+		"get", "nodes", "--request-timeout=15s").Run(); err != nil {
+		return false
+	}
+	return exec.Command("docker", "exec", h.ClusterName+"-control-plane", "true").Run() == nil
 }
 
 func containsLine(s, want string) bool {
@@ -336,6 +355,8 @@ func (h *Harness) InstallOllie(repoRoot string) {
 	h.KindLoad("ollie:e2e")
 	h.DockerBuild("ollie-controller:e2e", filepath.Join(repoRoot, "images/ollie-controller/Dockerfile"), repoRoot)
 	h.KindLoad("ollie-controller:e2e")
+	h.DockerBuild("ollie-query:e2e", filepath.Join(repoRoot, "images/ollie-query/Dockerfile"), repoRoot)
+	h.KindLoad("ollie-query:e2e")
 	h.PullAndLoad(PinnedOBIImage(h.t, repoRoot))
 
 	h.Kubectl("apply", "-k", filepath.Join(repoRoot, "k8s"))
@@ -343,8 +364,11 @@ func (h *Harness) InstallOllie(repoRoot string) {
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"agent","image":"ollie:e2e","imagePullPolicy":"Never"}]}}}}`)
 	h.Kubectl("patch", "deployment", "ollie-controller", "-n", "ollie-system", "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"controller","image":"ollie-controller:e2e","imagePullPolicy":"Never"}]}}}}`)
+	h.Kubectl("patch", "deployment", "ollie-query", "-n", "ollie-system", "--type=strategic",
+		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"query","image":"ollie-query:e2e","imagePullPolicy":"Never"}]}}}}`)
 	h.WaitRollout("daemonset", "ollie-agent", "ollie-system", 5*time.Minute)
 	h.WaitRollout("deployment", "ollie-controller", "ollie-system", 3*time.Minute)
+	h.WaitRollout("deployment", "ollie-query", "ollie-system", 3*time.Minute)
 }
 
 // DeployTestWorkload loads the agnhost image and starts the echo
