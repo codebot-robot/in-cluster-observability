@@ -44,6 +44,11 @@ const (
 	TypeCode_ObjectType TypeCode = 1
 )
 
+const (
+	fileMagic   uint32 = 0x5042494E // "PBIN"
+	fileVersion uint32 = 1
+)
+
 type Writer struct {
 	dir          string
 	fileMutex    sync.Mutex
@@ -108,6 +113,14 @@ func (w *Writer) rotateShard() error {
 	}
 	w.f = f
 	w.currentShard = shardName
+
+	// Write the file header
+	fileHeader := make([]byte, 16)
+	binary.BigEndian.PutUint32(fileHeader[0:4], fileMagic)
+	binary.BigEndian.PutUint32(fileHeader[4:8], fileVersion)
+	if _, err := w.f.Write(fileHeader); err != nil {
+		return err
+	}
 
 	// Re-write all known type codes to the new shard so it's self-contained.
 	w.typeCodesMutex.Lock()
@@ -258,6 +271,28 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 				return
 			}
 			defer f.Close()
+
+			fileHeader := make([]byte, 16)
+			n, err := io.ReadFull(f, fileHeader)
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+			}
+
+			if n < 16 || binary.BigEndian.Uint32(fileHeader[0:4]) != fileMagic {
+				log.Printf("warning: shard file %s has missing or incorrect magic; treating as legacy version 0", file)
+				if _, err := f.Seek(0, io.SeekStart); err != nil {
+					log.Printf("failed to seek to start of legacy shard file %s: %v", file, err)
+					return
+				}
+			} else {
+				version := binary.BigEndian.Uint32(fileHeader[4:8])
+				if version > fileVersion {
+					log.Printf("warning: shard file %s has unsupported version %d (max supported %d); skipping", file, version, fileVersion)
+					return
+				}
+			}
 
 			typeByCode := make(map[TypeCode]string)
 

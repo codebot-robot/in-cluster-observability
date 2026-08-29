@@ -17,14 +17,19 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/crc32"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
 )
 
 func TestWriter(t *testing.T) {
@@ -52,6 +57,20 @@ func TestWriter(t *testing.T) {
 		t.Fatalf("failed to open output file: %v", err)
 	}
 	defer f.Close()
+
+	// Verify the 16-byte file header
+	fileHeader := make([]byte, 16)
+	if _, err := io.ReadFull(f, fileHeader); err != nil {
+		t.Fatalf("failed to read file header: %v", err)
+	}
+	magic := binary.BigEndian.Uint32(fileHeader[0:4])
+	version := binary.BigEndian.Uint32(fileHeader[4:8])
+	if magic != fileMagic {
+		t.Errorf("expected file magic %x, got %x", fileMagic, magic)
+	}
+	if version != fileVersion {
+		t.Errorf("expected file version %d, got %d", fileVersion, version)
+	}
 
 	// 1st record should be ObjectType for ObjectType
 	header := make([]byte, 16)
@@ -94,6 +113,9 @@ func corruptRecordInFile(t *testing.T, filename string, recordIndex int) {
 	}
 
 	offset := 0
+	if len(data) >= 16 && binary.BigEndian.Uint32(data[0:4]) == fileMagic {
+		offset = 16
+	}
 	currentIdx := 0
 	for offset < len(data) {
 		if offset+16 > len(data) {
@@ -125,6 +147,9 @@ func truncateFileAtRecordPayload(t *testing.T, filename string, recordIndex int,
 	}
 
 	offset := 0
+	if len(data) >= 16 && binary.BigEndian.Uint32(data[0:4]) == fileMagic {
+		offset = 16
+	}
 	currentIdx := 0
 	for offset < len(data) {
 		if offset+16 > len(data) {
@@ -153,6 +178,9 @@ func getRecordPayloadLen(t *testing.T, filename string, recordIndex int) int {
 	}
 
 	offset := 0
+	if len(data) >= 16 && binary.BigEndian.Uint32(data[0:4]) == fileMagic {
+		offset = 16
+	}
 	currentIdx := 0
 	for offset < len(data) {
 		if offset+16 > len(data) {
@@ -366,4 +394,103 @@ func TestWriter_CRCVerification(t *testing.T) {
 			t.Errorf("expected no warnings or failed read logs for truncated tail, got: %q", logStr)
 		}
 	})
+}
+
+func TestWriter_Query_Versions(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "otel-test-query-versions-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// 1. Create a legacy version 0 shard file (no magic, no version header)
+	// We'll write the TypeCode mapping first, then a Trace record.
+	legacyShard := filepath.Join(tmpDir, "shard-00000000000000000000.bin")
+	lf, err := os.OpenFile(legacyShard, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("failed to create legacy shard: %v", err)
+	}
+
+	// ObjectType for ObjectType
+	objType := &pb.ObjectType{
+		TypeCode: uint32(TypeCode_ObjectType),
+		TypeName: "otlptracefile.ObjectType",
+	}
+	objTypeData := objType.Marshal()
+	lf.Write(makeRecordHeader(objTypeData, TypeCode_ObjectType))
+	lf.Write(objTypeData)
+
+	// ObjectType for ExportTraceServiceRequest
+	traceType := &pb.ObjectType{
+		TypeCode: 32,
+		TypeName: "opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest",
+	}
+	traceTypeData := traceType.Marshal()
+	lf.Write(makeRecordHeader(traceTypeData, TypeCode_ObjectType))
+	lf.Write(traceTypeData)
+
+	// Record of type ExportTraceServiceRequest
+	traceMsg := &coltracepb.ExportTraceServiceRequest{}
+	traceData, err := proto.Marshal(traceMsg)
+	if err != nil {
+		t.Fatalf("failed to marshal trace msg: %v", err)
+	}
+	lf.Write(makeRecordHeader(traceData, 32))
+	lf.Write(traceData)
+	lf.Close()
+
+	// 2. Create a future version 2 shard file (has magic, but version is 2)
+	futureShard := filepath.Join(tmpDir, "shard-00000000000000000002.bin")
+	ff, err := os.OpenFile(futureShard, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("failed to create future shard: %v", err)
+	}
+	// Write magic and unsupported version (2) with 16-byte header
+	fileHeader := make([]byte, 16)
+	binary.BigEndian.PutUint32(fileHeader[0:4], fileMagic)
+	binary.BigEndian.PutUint32(fileHeader[4:8], 2)
+	ff.Write(fileHeader)
+
+	// Write ObjectType anyway (even though it should be skipped)
+	ff.Write(makeRecordHeader(objTypeData, TypeCode_ObjectType))
+	ff.Write(objTypeData)
+	ff.Close()
+
+	// 3. Create a modern version 1 shard file (using NewWriter)
+	writer, err := NewWriter(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create writer: %v", err)
+	}
+	defer writer.Close()
+
+	ctx := t.Context()
+	// Write one trace request using the modern writer
+	req := &coltracepb.ExportTraceServiceRequest{}
+	if err := writer.WriteObject(ctx, req); err != nil {
+		t.Fatalf("failed to write object: %v", err)
+	}
+
+	// 4. Run Query and verify we get exactly 2 messages:
+	// - 1 from legacy (version 0)
+	// - 1 from modern (version 1)
+	// (The future version 2 should be skipped entirely, thus not adding any extra trace requests)
+	results, err := writer.Query(ctx, "")
+	if err != nil {
+		t.Fatalf("failed to query: %v", err)
+	}
+
+	// We wrote 1 trace to legacy, and 1 to modern.
+	// Since future version is skipped, we expect exactly 2 ExportTraceServiceRequest results.
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func makeRecordHeader(data []byte, typeCode TypeCode) []byte {
+	header := make([]byte, 16)
+	binary.BigEndian.PutUint32(header[0:4], uint32(len(data)))
+	binary.BigEndian.PutUint32(header[4:8], crc32.ChecksumIEEE(data))
+	binary.BigEndian.PutUint32(header[8:12], 0) // Flags
+	binary.BigEndian.PutUint32(header[12:16], uint32(typeCode))
+	return header
 }
