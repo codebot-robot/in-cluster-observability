@@ -264,18 +264,26 @@ func (w *Writer) Query(ctx context.Context, query string) ([]proto.Message, erro
 			for {
 				header := make([]byte, 16)
 				if _, err := io.ReadFull(f, header); err != nil {
-					if err != io.EOF {
+					if err != io.EOF && err != io.ErrUnexpectedEOF {
 						log.Printf("failed to read header from %s: %v", file, err)
 					}
 					break
 				}
 
 				length := binary.BigEndian.Uint32(header[0:4])
+				expectedChecksum := binary.BigEndian.Uint32(header[4:8])
 				typeCode := TypeCode(binary.BigEndian.Uint32(header[12:16]))
 
 				data := make([]byte, length)
 				if _, err := io.ReadFull(f, data); err != nil {
-					log.Printf("failed to read data from %s: %v", file, err)
+					if err != io.EOF && err != io.ErrUnexpectedEOF {
+						log.Printf("failed to read data from %s: %v", file, err)
+					}
+					break
+				}
+
+				if crc32.ChecksumIEEE(data) != expectedChecksum {
+					log.Printf("warning: CRC32 mismatch reading shard %s: expected %x, got %x", file, expectedChecksum, crc32.ChecksumIEEE(data))
 					break
 				}
 
