@@ -85,6 +85,20 @@ type queryServer struct {
 	pb.UnimplementedQueryServiceServer
 }
 
+func (s *queryServer) SearchLogs(req *pb.SearchLogsRequest, stream grpc.ServerStreamingServer[pb.SearchLogsResponse]) error {
+	results, err := s.writer.SearchLogs(stream.Context(), req)
+	if err != nil {
+		return err
+	}
+
+	if len(results) > 0 {
+		if err := stream.Send(&pb.SearchLogsResponse{Logs: results}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *queryServer) Query(req *pb.QueryRequest, stream grpc.ServerStreamingServer[pb.QueryResponse]) error {
 	results, err := s.writer.Query(stream.Context(), req.Query)
 	if err != nil {
