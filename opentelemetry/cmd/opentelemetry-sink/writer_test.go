@@ -39,7 +39,7 @@ func TestWriter(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	writer, err := NewWriter(tmpDir)
+	writer, err := NewWriter(tmpDir, "", 0)
 	if err != nil {
 		t.Fatalf("failed to create writer: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestWriter_CRCVerification(t *testing.T) {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		writer, err := NewWriter(tmpDir)
+		writer, err := NewWriter(tmpDir, "", 0)
 		if err != nil {
 			t.Fatalf("failed to create writer: %v", err)
 		}
@@ -285,7 +285,7 @@ func TestWriter_CRCVerification(t *testing.T) {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		writer, err := NewWriter(tmpDir)
+		writer, err := NewWriter(tmpDir, "", 0)
 		if err != nil {
 			t.Fatalf("failed to create writer: %v", err)
 		}
@@ -344,7 +344,7 @@ func TestWriter_CRCVerification(t *testing.T) {
 		}
 		defer os.RemoveAll(tmpDir)
 
-		writer, err := NewWriter(tmpDir)
+		writer, err := NewWriter(tmpDir, "", 0)
 		if err != nil {
 			t.Fatalf("failed to create writer: %v", err)
 		}
@@ -457,7 +457,7 @@ func TestWriter_Query_Versions(t *testing.T) {
 	ff.Close()
 
 	// 3. Create a modern version 1 shard file (using NewWriter)
-	writer, err := NewWriter(tmpDir)
+	writer, err := NewWriter(tmpDir, "", 0)
 	if err != nil {
 		t.Fatalf("failed to create writer: %v", err)
 	}
