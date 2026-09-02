@@ -16,13 +16,17 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +37,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/parser"
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/pb"
 
 	"github.com/google/cel-go/cel"
@@ -40,7 +45,11 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
+
+//go:embed ui/*
+var uiFS embed.FS
 
 type Registry struct {
 	mu        sync.Mutex
@@ -145,8 +154,15 @@ func main() {
 	}
 
 	http.HandleFunc("/query", s.queryHandler)
+	http.HandleFunc("/api/logs/search", s.searchLogsHandler)
 	http.HandleFunc("/apis", s.apisHandler)
 	http.HandleFunc("/apis/", s.apisHandler)
+
+	subFS, err := fs.Sub(uiFS, "ui")
+	if err != nil {
+		log.Fatalf("failed to open embedded UI filesystem: %v", err)
+	}
+	http.Handle("/ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(subFS))))
 
 	// Start gRPC server for registrations
 	lis, err := net.Listen("tcp", *grpcAddr)
@@ -266,6 +282,231 @@ func querySink(ctx context.Context, addr string, qreq QueryRequest) ([][]byte, e
 		results = append(results, res.Traces...)
 	}
 	return results, nil
+}
+
+type searchResultItem struct {
+	Timestamp string          `json:"timestamp"`
+	Severity  string          `json:"severity"`
+	Namespace string          `json:"namespace"`
+	Pod       string          `json:"pod"`
+	Container string          `json:"container"`
+	Service   string          `json:"service"`
+	Body      string          `json:"body"`
+	Raw       json.RawMessage `json:"raw"`
+}
+
+type matchedLogItem struct {
+	timestamp int64
+	item      searchResultItem
+}
+
+func (s *Server) searchLogsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query().Get("q")
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+	limitStr := r.URL.Query().Get("limit")
+
+	var start, end time.Time
+	var err error
+
+	if startStr != "" {
+		start, err = time.Parse(time.RFC3339, startStr)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid start time format (expected RFC3339): %v", err), http.StatusBadRequest)
+			return
+		}
+	} else {
+		start = time.Now().Add(-1 * time.Hour)
+	}
+
+	if endStr != "" {
+		end, err = time.Parse(time.RFC3339, endStr)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid end time format (expected RFC3339): %v", err), http.StatusBadRequest)
+			return
+		}
+	} else {
+		end = time.Now()
+	}
+
+	limit := 1000
+	if limitStr != "" {
+		if val, err := strconv.Atoi(limitStr); err == nil && val > 0 {
+			limit = val
+		}
+	}
+
+	parsedQuery := parser.Parse(q)
+
+	var attributes []*pb.AttributeFilter
+	for k, v := range parsedQuery.Attributes {
+		attributes = append(attributes, &pb.AttributeFilter{
+			Key:   k,
+			Value: v,
+		})
+	}
+
+	req := &pb.SearchLogsRequest{
+		StartTimeUnixNano: start.UnixNano(),
+		EndTimeUnixNano:   end.UnixNano(),
+		BodyContains:      parsedQuery.BodyContains,
+		Attributes:        attributes,
+		Limit:             int32(limit),
+	}
+
+	addresses := s.registry.GetAddresses()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allSerializedLogs [][]byte
+
+	for _, addr := range addresses {
+		wg.Add(1)
+		go func(sinkAddr string) {
+			defer wg.Done()
+			res, err := searchLogsFromSink(r.Context(), sinkAddr, req)
+			if err != nil {
+				log.Printf("error searching logs from sink %s: %v", sinkAddr, err)
+				return
+			}
+			mu.Lock()
+			allSerializedLogs = append(allSerializedLogs, res...)
+			mu.Unlock()
+		}(addr)
+	}
+	wg.Wait()
+
+	var matchedItems []matchedLogItem
+
+	for _, rawBytes := range allSerializedLogs {
+		var unmarshaled collogspb.ExportLogsServiceRequest
+		if err := proto.Unmarshal(rawBytes, &unmarshaled); err != nil {
+			log.Printf("error unmarshaling log search result: %v", err)
+			continue
+		}
+
+		if len(unmarshaled.ResourceLogs) == 0 ||
+			len(unmarshaled.ResourceLogs[0].ScopeLogs) == 0 ||
+			len(unmarshaled.ResourceLogs[0].ScopeLogs[0].LogRecords) == 0 {
+			continue
+		}
+
+		rl := unmarshaled.ResourceLogs[0]
+		lr := rl.ScopeLogs[0].LogRecords[0]
+
+		ts := lr.TimeUnixNano
+		if ts == 0 {
+			ts = lr.ObservedTimeUnixNano
+		}
+
+		var ns, pod, container, service string
+		if rl.Resource != nil {
+			for _, attr := range rl.Resource.Attributes {
+				switch attr.Key {
+				case "k8s.namespace.name":
+					ns = anyValueString(attr.Value)
+				case "k8s.pod.name":
+					pod = anyValueString(attr.Value)
+				case "k8s.container.name":
+					container = anyValueString(attr.Value)
+				case "service.name":
+					service = anyValueString(attr.Value)
+				}
+			}
+		}
+
+		rawJSON, err := protojson.Marshal(&unmarshaled)
+		if err != nil {
+			log.Printf("error marshaling log to OTLP JSON: %v", err)
+			continue
+		}
+
+		timeObj := time.Unix(0, int64(ts)).UTC()
+
+		matchedItems = append(matchedItems, matchedLogItem{
+			timestamp: int64(ts),
+			item: searchResultItem{
+				Timestamp: timeObj.Format(time.RFC3339Nano),
+				Severity:  lr.SeverityText,
+				Namespace: ns,
+				Pod:       pod,
+				Container: container,
+				Service:   service,
+				Body:      anyValueString(lr.Body),
+				Raw:       json.RawMessage(rawJSON),
+			},
+		})
+	}
+
+	sort.Slice(matchedItems, func(i, j int) bool {
+		return matchedItems[i].timestamp > matchedItems[j].timestamp
+	})
+
+	if len(matchedItems) > limit {
+		matchedItems = matchedItems[:limit]
+	}
+
+	results := []searchResultItem{}
+	for _, mi := range matchedItems {
+		results = append(results, mi.item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		log.Printf("error encoding search results: %v", err)
+	}
+}
+
+func searchLogsFromSink(ctx context.Context, addr string, req *pb.SearchLogsRequest) ([][]byte, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := pb.NewQueryServiceClient(conn)
+	stream, err := client.SearchLogs(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var results [][]byte
+	for {
+		res, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res.Logs...)
+	}
+	return results, nil
+}
+
+func anyValueString(v *commonpb.AnyValue) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.GetValue().(type) {
+	case *commonpb.AnyValue_StringValue:
+		return val.StringValue
+	case *commonpb.AnyValue_BoolValue:
+		if val.BoolValue {
+			return "true"
+		}
+		return "false"
+	case *commonpb.AnyValue_IntValue:
+		return strconv.FormatInt(val.IntValue, 10)
+	case *commonpb.AnyValue_DoubleValue:
+		return strconv.FormatFloat(val.DoubleValue, 'g', -1, 64)
+	default:
+		return v.String()
+	}
 }
 
 func (s *Server) apisHandler(w http.ResponseWriter, r *http.Request) {
