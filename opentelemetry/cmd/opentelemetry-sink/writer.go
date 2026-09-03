@@ -35,6 +35,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/gke-labs/in-cluster-observability/opentelemetry/cmd/opentelemetry-sink/pb"
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/async"
+	"github.com/gke-labs/in-cluster-observability/opentelemetry/pkg/store"
+	"k8s.io/klog/v2"
 )
 
 type TypeCode uint32
@@ -60,22 +63,59 @@ type Writer struct {
 	typeCodes      map[string]TypeCode
 
 	stopChan chan struct{}
+
+	// Uploader fields
+	archiveURL     string
+	localRetention time.Duration
+	podName        string
+	archiveStore   store.ArchiveStore
+	uploader       *async.TaskRunner
+	cleanupMutex   sync.Mutex
 }
 
-func NewWriter(dir string) (*Writer, error) {
+func NewWriter(dir string, archiveURL string, localRetention time.Duration) (*Writer, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
 
+	pod := os.Getenv("POD_NAME")
+	if pod == "" {
+		var err error
+		pod, err = os.Hostname()
+		if err != nil {
+			pod = "unknown-pod"
+		}
+	}
+
 	w := &Writer{
-		dir:          dir,
-		nextTypeCode: 32,
-		typeCodes:    make(map[string]TypeCode),
-		stopChan:     make(chan struct{}),
+		dir:            dir,
+		nextTypeCode:   32,
+		typeCodes:      make(map[string]TypeCode),
+		stopChan:       make(chan struct{}),
+		archiveURL:     archiveURL,
+		localRetention: localRetention,
+		podName:        pod,
+	}
+
+	if w.archiveURL != "" {
+		ctx := context.Background()
+		archiveStore, err := store.NewArchiveStore(ctx, archiveURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open archive store at %s: %w", archiveURL, err)
+		}
+		w.archiveStore = archiveStore
+		w.uploader = async.NewTaskRunner(3)
 	}
 
 	if err := w.rotateShard(); err != nil {
+		if w.archiveStore != nil {
+			_ = w.archiveStore.Close()
+		}
 		return nil, err
+	}
+
+	if w.archiveURL != "" {
+		w.enqueueCatchUp()
 	}
 
 	go w.shardingLoop()
@@ -92,6 +132,9 @@ func (w *Writer) shardingLoop() {
 			if err := w.rotateShard(); err != nil {
 				log.Printf("failed to rotate shard: %v", err)
 			}
+			if w.archiveURL != "" {
+				go w.runRetentionCleanup(context.Background())
+			}
 		case <-w.stopChan:
 			return
 		}
@@ -102,8 +145,17 @@ func (w *Writer) rotateShard() error {
 	w.fileMutex.Lock()
 	defer w.fileMutex.Unlock()
 
+	var oldShard string
 	if w.f != nil {
-		w.f.Close()
+		syncErr := w.f.Sync()
+		closeErr := w.f.Close()
+		if syncErr != nil {
+			return fmt.Errorf("failed to sync shard: %w", syncErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("failed to close shard: %w", closeErr)
+		}
+		oldShard = w.currentShard
 	}
 
 	shardName := filepath.Join(w.dir, fmt.Sprintf("shard-%020d.bin", time.Now().UnixNano()))
@@ -146,17 +198,185 @@ func (w *Writer) rotateShard() error {
 		}
 	}
 
+	if oldShard != "" && w.archiveURL != "" {
+		w.enqueueUpload(oldShard)
+	}
+
 	return nil
 }
 
 func (w *Writer) Close() error {
 	close(w.stopChan)
 	w.fileMutex.Lock()
-	defer w.fileMutex.Unlock()
+	var oldShard string
 	if w.f != nil {
-		return w.f.Close()
+		if err := w.f.Sync(); err != nil {
+			log.Printf("warning: failed to sync current shard on close: %v", err)
+		}
+		if err := w.f.Close(); err != nil {
+			log.Printf("warning: failed to close current shard: %v", err)
+		}
+		oldShard = w.currentShard
+		w.f = nil
+	}
+	w.fileMutex.Unlock()
+
+	if oldShard != "" && w.archiveURL != "" {
+		w.enqueueUpload(oldShard)
+	}
+
+	if w.archiveURL != "" {
+		w.uploader.Close()
+		if w.archiveStore != nil {
+			if err := w.archiveStore.Close(); err != nil {
+				log.Printf("warning: failed to close archive bucket: %v", err)
+			}
+		}
 	}
 	return nil
+}
+
+func (w *Writer) enqueueUpload(shardPath string) {
+	err := w.uploader.Submit(func() {
+		w.processUploadWithRetry(shardPath)
+	})
+	if err != nil {
+		log.Printf("warning: failed to submit upload for shard %s: %v", shardPath, err)
+	}
+}
+
+func (w *Writer) enqueueCatchUp() {
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		log.Printf("failed to read dir for crash catch-up: %v", err)
+		return
+	}
+
+	w.fileMutex.Lock()
+	current := w.currentShard
+	w.fileMutex.Unlock()
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "shard-") && strings.HasSuffix(entry.Name(), ".bin") {
+			fullPath := filepath.Join(w.dir, entry.Name())
+			if fullPath != current {
+				log.Printf("found leftover shard on startup, enqueuing for upload: %s", fullPath)
+				w.enqueueUpload(fullPath)
+			}
+		}
+	}
+}
+
+func (w *Writer) uploadShard(ctx context.Context, shardPath string) error {
+	shardName := filepath.Base(shardPath)
+	key := "raw/" + w.podName + "/" + shardName
+
+	if err := w.archiveStore.Upload(ctx, key, shardPath); err != nil {
+		return fmt.Errorf("failed to upload shard: %w", err)
+	}
+
+	log.Printf("successfully uploaded shard %s to %s", shardPath, key)
+	return nil
+}
+
+func (w *Writer) processUploadWithRetry(shardPath string) {
+	if _, err := os.Stat(shardPath); os.IsNotExist(err) {
+		log.Printf("shard path %s does not exist, skipping upload", shardPath)
+		return
+	}
+
+	pending := w.uploader.TaskCount()
+	log.Printf("starting upload for %s. pending uploads in queue: %d", shardPath, pending)
+
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		err := w.uploadShard(ctx, shardPath)
+		cancel()
+
+		if err == nil {
+			w.runRetentionCleanup(context.Background())
+			return
+		}
+
+		log.Printf("failed to upload shard %s: %v. Retrying in %v...", shardPath, err, backoff)
+
+		select {
+		case <-w.stopChan:
+			log.Printf("writer is stopping; aborting active upload retry for %s. Shard remains on local disk.", shardPath)
+			return
+		case <-time.After(backoff):
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+func (w *Writer) runRetentionCleanup(ctx context.Context) {
+	if w.archiveURL == "" {
+		return
+	}
+
+	log := klog.FromContext(ctx)
+
+	w.cleanupMutex.Lock()
+	defer w.cleanupMutex.Unlock()
+
+	w.fileMutex.Lock()
+	current := w.currentShard
+	w.fileMutex.Unlock()
+
+	now := time.Now()
+	err := filepath.WalkDir(w.dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, "shard-") || !strings.HasSuffix(name, ".bin") {
+			return nil
+		}
+		if path == current {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		if now.Sub(info.ModTime()) < w.localRetention {
+			return nil
+		}
+
+		ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+		key := "raw/" + w.podName + "/" + name
+		uploaded, err := w.archiveStore.IsUploaded(ctxTimeout, key, path)
+		cancel()
+
+		if err == nil && uploaded {
+			if err := os.Remove(path); err != nil {
+				log.Error(err, "failed to remove local shard", "path", path)
+			} else {
+				log.Info("removed local shard (retention expired and upload verified)", "path", path)
+			}
+		} else if err != nil {
+			log.Error(err, "keeping local shard; retention expired but remote check failed", "path", path)
+		} else {
+			log.Info("keeping local shard; retention expired but not uploaded", "path", path)
+		}
+		return nil
+	})
+
+	if err != nil {
+		log.Error(err, "failed to walk dir for retention cleanup")
+	}
 }
 
 func (w *Writer) WriteObject(ctx context.Context, obj proto.Message) error {

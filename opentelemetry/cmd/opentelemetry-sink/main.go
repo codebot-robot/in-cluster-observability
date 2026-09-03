@@ -220,9 +220,11 @@ func main() {
 	httpAddr := flag.String("http-addr", ":4318", "address to listen on for HTTP queries")
 	queryServerAddr := flag.String("query-server", "queryserver.observability-system:9443", "address of the query server")
 	path := flag.String("path", "otel-data", "path to the output directory")
+	archiveURL := flag.String("archive-url", "", "URL of the archive bucket (e.g. gs://bucket/prefix)")
+	localRetention := flag.Duration("local-retention", 1*time.Hour, "Local shard retention duration (only active if archive-url is set)")
 	flag.Parse()
 
-	writer, err := NewWriter(*path)
+	writer, err := NewWriter(*path, *archiveURL, *localRetention)
 	if err != nil {
 		log.Fatalf("failed to create writer: %v", err)
 	}
